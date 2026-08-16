@@ -29,6 +29,7 @@ USER_AGENT = "Kamu-Ilan-Takip/1.0"
 # ============================================================
 
 def get_url(url):
+
     headers = {
         "User-Agent": USER_AGENT
     }
@@ -45,16 +46,21 @@ def get_url(url):
 
 
 # ============================================================
-# RSS ADRESİNİ BUL
+# RSS ADRESİ
 # ============================================================
 
 def rss_adresini_bul():
 
     print("Kariyer Kapısı RSS sayfası okunuyor...")
 
-    rss_sayfasi = BASE_URL + "/RSS/RssLinkiAl"
+    rss_sayfasi = (
+        BASE_URL
+        + "/RSS/RssLinkiAl"
+    )
 
-    response = get_url(rss_sayfasi)
+    response = get_url(
+        rss_sayfasi
+    )
 
     html_text = response.text
 
@@ -79,11 +85,6 @@ def rss_adresini_bul():
 
     if infrastructure_url is None:
 
-        print(
-            "Infrastructure dosyası bulunamadı."
-        )
-
-        # Daha önce tespit ettiğimiz dosyayı kullan
         infrastructure_url = (
             BASE_URL
             + "/js/Infrastructure.enxa2bxk74.js"
@@ -100,7 +101,6 @@ def rss_adresini_bul():
 
     js = js_response.text
 
-    # kvkkbaseurl değerini bul
     eslesme = re.search(
         r'kvkkbaseurl\s*[:=]\s*["\']([^"\']+)',
         js,
@@ -113,16 +113,16 @@ def rss_adresini_bul():
 
     else:
 
-        # Kariyer Kapısı'nın mevcut yapısı
-        rss_base = BASE_URL + "/"
+        rss_base = (
+            BASE_URL
+            + "/"
+        )
 
     if not rss_base.endswith("/"):
 
         rss_base += "/"
 
-    rss_url = rss_base + "RSS"
-
-    return rss_url
+    return rss_base + "RSS"
 
 
 # ============================================================
@@ -151,7 +151,7 @@ def rss_oku(content):
     ilanlar = []
 
     # --------------------------------------------------------
-    # RSS FORMAT
+    # RSS
     # --------------------------------------------------------
 
     for item in root.findall(
@@ -178,34 +178,30 @@ def rss_oku(content):
             ""
         )
 
-        ilan = {
-
-            "title": html.unescape(
-                title or ""
-            ).strip(),
-
-            "link": (
-                link or ""
-            ).strip(),
-
-            "description": html.unescape(
-                description or ""
-            ).strip(),
-
-            "id": (
-                guid
-                or link
-                or title
-                or ""
-            ).strip()
-        }
+        ilan_id = (
+            guid
+            or link
+            or title
+            or ""
+        ).strip()
 
         ilanlar.append(
-            ilan
+            {
+                "id": ilan_id,
+                "title": html.unescape(
+                    title or ""
+                ).strip(),
+                "description": html.unescape(
+                    description or ""
+                ).strip(),
+                "link": (
+                    link or ""
+                ).strip()
+            }
         )
 
     # --------------------------------------------------------
-    # ATOM FORMAT
+    # ATOM
     # --------------------------------------------------------
 
     if not ilanlar:
@@ -254,35 +250,58 @@ def rss_oku(content):
                     ""
                 )
 
-            ilan = {
-
-                "title": html.unescape(
-                    title or ""
-                ).strip(),
-
-                "link": link.strip(),
-
-                "description": html.unescape(
-                    summary or ""
-                ).strip(),
-
-                "id": (
-                    entry_id
-                    or link
-                    or title
-                    or ""
-                ).strip()
-            }
+            ilan_id = (
+                entry_id
+                or link
+                or title
+                or ""
+            ).strip()
 
             ilanlar.append(
-                ilan
+                {
+                    "id": ilan_id,
+                    "title": html.unescape(
+                        title or ""
+                    ).strip(),
+                    "description": html.unescape(
+                        summary or ""
+                    ).strip(),
+                    "link": link.strip()
+                }
             )
 
     return ilanlar
 
 
 # ============================================================
-# DAHA ÖNCE GÖNDERİLEN İLANLAR
+# NORMALİZASYON
+# ============================================================
+
+def normalize(text):
+
+    text = text.lower()
+
+    karakterler = {
+        "ı": "i",
+        "ğ": "g",
+        "ü": "u",
+        "ş": "s",
+        "ö": "o",
+        "ç": "c"
+    }
+
+    for eski, yeni in karakterler.items():
+
+        text = text.replace(
+            eski,
+            yeni
+        )
+
+    return text
+
+
+# ============================================================
+# DAHA ÖNCE GÖNDERİLENLER
 # ============================================================
 
 def gonderilenleri_oku():
@@ -305,7 +324,7 @@ def gonderilenleri_oku():
                 file
             )
 
-            return set(data)
+        return set(data)
 
     except Exception:
 
@@ -333,55 +352,119 @@ def gonderilenleri_kaydet(
 
 
 # ============================================================
-# TÜRKÇE NORMALİZASYON
+# KPSS PUANINI BUL
 # ============================================================
 
-def normalize(text):
+def kpss_taban_puani_bul(text):
 
-    text = text.lower()
-
-    karakterler = {
-        "ı": "i",
-        "ğ": "g",
-        "ü": "u",
-        "ş": "s",
-        "ö": "o",
-        "ç": "c"
-    }
-
-    for eski, yeni in karakterler.items():
-
-        text = text.replace(
-            eski,
-            yeni
-        )
-
-    return text
-
-
-# ============================================================
-# İLAN UYGUNLUK KONTROLÜ
-# ============================================================
-
-def ilan_uygun_mu(ilan):
-
-    text = normalize(
-        ilan["title"]
-        + " "
-        + ilan["description"]
+    temiz = normalize(
+        text
     )
 
-    # --------------------------------------------------------
-    # ADALET / HUKUK ALANI
-    # --------------------------------------------------------
+    # "KPSS 70"
+    eslesme = re.search(
+        r"kpss.{0,40}?(?:puan|puanı|puani)?[^0-9]{0,10}(\d{2}(?:[.,]\d+)?)",
+        temiz
+    )
 
-    alanlar = [
+    if eslesme:
+
+        try:
+
+            return float(
+                eslesme.group(1).replace(
+                    ",",
+                    "."
+                )
+            )
+
+        except ValueError:
+
+            pass
+
+    # "en az 70 KPSS"
+    eslesme = re.search(
+        r"(?:en az|minimum|min|taban).{0,30}?(\d{2}(?:[.,]\d+)?).{0,30}?kpss",
+        temiz
+    )
+
+    if eslesme:
+
+        try:
+
+            return float(
+                eslesme.group(1).replace(
+                    ",",
+                    "."
+                )
+            )
+
+        except ValueError:
+
+            pass
+
+    return None
+
+
+# ============================================================
+# EĞİTİM DÜZEYİ
+# ============================================================
+
+def onlisans_ilan_mi(text):
+
+    temiz = normalize(
+        text
+    )
+
+    ifadeler = [
+
+        "onlisans",
+
+        "on lisans",
+
+        "on-lisans",
+
+        "on lisans mezunu",
+
+        "2 yillik",
+
+        "iki yillik",
+
+        "meslek yuksekokulu",
+
+        "myo"
+    ]
+
+    for ifade in ifadeler:
+
+        if ifade in temiz:
+
+            return True
+
+    return False
+
+
+# ============================================================
+# ADALET İLE İLGİLİ Mİ?
+# ============================================================
+
+def adalet_ile_ilgili_mi(text):
+
+    temiz = normalize(
+        text
+    )
+
+    kelimeler = [
 
         "adalet",
 
         "hukuk",
 
         "icra",
+
+        "icra mudurlugu",
+
+        "icra mudur",
 
         "katip",
 
@@ -393,138 +476,105 @@ def ilan_uygun_mu(ilan):
 
         "mahkeme",
 
-        "icra mudurlugu",
+        "adalet bakanligi",
 
-        "icra mudur",
-
-        "adalet bakanligi"
+        "infaz"
     ]
 
-    alan_uygun = False
+    for kelime in kelimeler:
 
-    for kelime in alanlar:
+        if kelime in temiz:
 
-        if kelime in text:
+            return True
 
-            alan_uygun = True
+    return False
 
-            break
 
-    if not alan_uygun:
+# ============================================================
+# İLAN UYGUNLUK KONTROLÜ
+# ============================================================
 
-        return False
+def ilan_uygun_mu(ilan):
 
-    # --------------------------------------------------------
-    # ÖNLİSANS / ADALET
-    # --------------------------------------------------------
-
-    egitimler = [
-
-        "onlisans",
-
-        "on lisans",
-
-        "adalet programi",
-
-        "adalet bolumu",
-
-        "adalet mezunu"
+    baslik = ilan[
+        "title"
     ]
 
-    egitim_uygun = False
+    aciklama = ilan[
+        "description"
+    ]
 
-    for kelime in egitimler:
-
-        if kelime in text:
-
-            egitim_uygun = True
-
-            break
-
-    # --------------------------------------------------------
-    # KPSS
-    # --------------------------------------------------------
-
-    kpss_var = "kpss" in text
-
-    if not egitim_uygun and not kpss_var:
-
-        return False
+    text = normalize(
+        baslik
+        + " "
+        + aciklama
+    )
 
     # --------------------------------------------------------
-    # TABAN PUAN KONTROLÜ
+    # KPSS TABAN PUANI
     # --------------------------------------------------------
 
-    # Burada karmaşık regex kullanmıyoruz.
-    #
-    # Örneğin:
-    # "KPSS 70 puan"
-    # "KPSS'den en az 70"
-    #
-    # gibi ifadelerde 70 değerini yakalamaya çalışıyoruz.
-
-    sayilar = re.findall(
-        r"\b\d{2}(?:[.,]\d+)?\b",
+    taban = kpss_taban_puani_bul(
         text
     )
 
-    for sayi in sayilar:
+    if taban is not None:
 
-        try:
+        print(
+            "KPSS taban puanı:",
+            taban,
+            "-",
+            baslik
+        )
 
-            puan = float(
-                sayi.replace(
-                    ",",
-                    "."
-                )
-            )
-
-        except ValueError:
-
-            continue
-
-        # 50-100 arası sayıları puan adayı olarak değerlendir
-        if 50 <= puan <= 100:
-
-            yakin_baslik = text[
-                max(
-                    0,
-                    text.find(sayi) - 80
-                ):
-                text.find(sayi) + 80
-            ]
-
-            if (
-                "kpss" in yakin_baslik
-                and puan > KPSS_PUANI
-            ):
-
-                return False
-
-    # --------------------------------------------------------
-    # BAŞVURU KAPANMIŞ MI?
-    # --------------------------------------------------------
-
-    kapanmis_ifadeler = [
-
-        "basvurular sona ermistir",
-
-        "basvuru sona ermistir",
-
-        "basvuru suresi dolmustur",
-
-        "son basvuru tarihi gecmistir",
-
-        "basvuruya kapalidir"
-    ]
-
-    for ifade in kapanmis_ifadeler:
-
-        if ifade in text:
+        if taban > KPSS_PUANI:
 
             return False
 
-    return True
+    # --------------------------------------------------------
+    # ADALET / HUKUK İLANLARI
+    # --------------------------------------------------------
+
+    if adalet_ile_ilgili_mi(
+        text
+    ):
+
+        return True
+
+    # --------------------------------------------------------
+    # ÖNLİSANS İLANLARI
+    # --------------------------------------------------------
+
+    if onlisans_ilan_mi(
+        text
+    ):
+
+        return True
+
+    # --------------------------------------------------------
+    # "HERHANGİ BİR ÖNLİSANS"
+    # --------------------------------------------------------
+
+    genel_onlisans = [
+
+        "herhangi bir onlisans",
+
+        "herhangi bir on lisans",
+
+        "herhangi bir onlisans programindan",
+
+        "herhangi bir on lisans programindan",
+
+        "onlisans mezunu olmak"
+    ]
+
+    for ifade in genel_onlisans:
+
+        if ifade in text:
+
+            return True
+
+    return False
 
 
 # ============================================================
@@ -559,6 +609,11 @@ def telegram_gonder(
         timeout=30
     )
 
+    print(
+        "Telegram HTTP:",
+        response.status_code
+    )
+
     response.raise_for_status()
 
 
@@ -574,10 +629,10 @@ def telegram_mesaji(
         "description"
     ]
 
-    if len(aciklama) > 1800:
+    if len(aciklama) > 2500:
 
         aciklama = (
-            aciklama[:1800]
+            aciklama[:2500]
             + "..."
         )
 
@@ -625,7 +680,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # RSS ADRESİ
+    # RSS
     # --------------------------------------------------------
 
     rss_url = rss_adresini_bul()
@@ -634,10 +689,6 @@ def main():
         "RSS:",
         rss_url
     )
-
-    # --------------------------------------------------------
-    # RSS'İ İNDİR
-    # --------------------------------------------------------
 
     response = get_url(
         rss_url
@@ -654,7 +705,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # İLANLARI OKU
+    # İLANLAR
     # --------------------------------------------------------
 
     ilanlar = rss_oku(
@@ -667,7 +718,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # DAHA ÖNCE GÖNDERİLENLER
+    # GÖNDERİLENLER
     # --------------------------------------------------------
 
     gonderilenler = (
@@ -683,36 +734,34 @@ def main():
     telegram_sayisi = 0
 
     # --------------------------------------------------------
-    # İLANLARI KONTROL ET
+    # TARAMA
     # --------------------------------------------------------
 
     for ilan in ilanlar:
 
-        # ID yoksa hash üret
         if not ilan["id"]:
 
-            ham_veri = (
-
+            ham = (
                 ilan["title"]
-                + ilan["link"]
                 + ilan["description"]
+                + ilan["link"]
             )
 
             ilan["id"] = hashlib.sha256(
-                ham_veri.encode(
+                ham.encode(
                     "utf-8"
                 )
             ).hexdigest()
 
-        # Daha önce gönderilmiş
         if ilan["id"] in gonderilenler:
 
             continue
 
-        # Uygun değil
-        if not ilan_uygun_mu(
+        uygun = ilan_uygun_mu(
             ilan
-        ):
+        )
+
+        if not uygun:
 
             continue
 
@@ -720,16 +769,26 @@ def main():
 
         print("")
         print(
-            "UYGUN İLAN:"
+            "======================================"
         )
 
         print(
+            "UYGUN İLAN"
+        )
+
+        print(
+            "Başlık:",
             ilan["title"]
         )
 
-        # ----------------------------------------------------
-        # TELEGRAM
-        # ----------------------------------------------------
+        print(
+            "Link:",
+            ilan["link"]
+        )
+
+        print(
+            "======================================"
+        )
 
         try:
 
@@ -741,15 +800,15 @@ def main():
                 mesaj
             )
 
-            print(
-                "Telegram mesajı gönderildi."
-            )
-
             yeni_gonderilenler.add(
                 ilan["id"]
             )
 
             telegram_sayisi += 1
+
+            print(
+                "Telegram mesajı gönderildi."
+            )
 
         except Exception as hata:
 
@@ -786,19 +845,7 @@ def main():
         "Toplam ilan:",
         len(ilanlar)
     )
-print(
-    
 
-print("")
-print("===== TÜM İLANLAR =====")
-
-for i, ilan in enumerate(ilanlar, 1):
-
-    print("")
-    print(f"--- İLAN {i} ---")
-    print("BAŞLIK:", ilan["title"])
-    print("AÇIKLAMA:", ilan["description"][:1000])
-    print("LINK:", ilan["link"])
     print(
         "Uygun yeni ilan:",
         uygun_sayisi
@@ -815,7 +862,7 @@ for i, ilan in enumerate(ilanlar, 1):
 
 
 # ============================================================
-# PROGRAMI BAŞLAT
+# BAŞLAT
 # ============================================================
 
 if __name__ == "__main__":
