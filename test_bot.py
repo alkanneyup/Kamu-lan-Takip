@@ -10,8 +10,12 @@ response = requests.post(
     url,
     data={
         "chat_id": CHAT_ID,
-        "text": "✅ Kamu İlan Takip botu çalışıyor!"
-    }
+        "text": "✅ Kamu İlan Takip sistemi test mesajı."
+    },
+    timeout=30
 )
 
+print("TELEGRAM CEVABI:")
 print(response.text)
+
+response.raise_for_status()
