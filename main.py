@@ -786,7 +786,19 @@ def main():
         "Toplam ilan:",
         len(ilanlar)
     )
+print(
+    
 
+print("")
+print("===== TÜM İLANLAR =====")
+
+for i, ilan in enumerate(ilanlar, 1):
+
+    print("")
+    print(f"--- İLAN {i} ---")
+    print("BAŞLIK:", ilan["title"])
+    print("AÇIKLAMA:", ilan["description"][:1000])
+    print("LINK:", ilan["link"])
     print(
         "Uygun yeni ilan:",
         uygun_sayisi
