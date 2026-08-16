@@ -17,7 +17,7 @@ jobs:
           python-version: "3.12"
 
       - name: Gerekli kütüphaneyi kur
-        run: pip install requests beautifulsoup4
+        run: pip install requests
 
       - name: Botu çalıştır
         env:
