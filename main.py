@@ -8,112 +8,178 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urljoin
 
 
-BASE = "https://kariyerkapisi.gov.tr"
-USER_AGENT = "Kamu-Ilan-Takip/1.0"
+# ============================================================
+# AYARLAR
+# ============================================================
+
+BASE_URL = "https://kariyerkapisi.gov.tr"
+
+KPSS_PUANI = 76.29
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-KPSS_SCORE = 76.29
-SENT_FILE = "sent_ids.json"
+GONDERILEN_DOSYA = "sent_ids.json"
+
+USER_AGENT = "Kamu-Ilan-Takip/1.0"
 
 
-def get(url, **kwargs):
-    headers = kwargs.pop("headers", {})
-    headers["User-Agent"] = USER_AGENT
+# ============================================================
+# HTTP
+# ============================================================
+
+def get_url(url):
+    headers = {
+        "User-Agent": USER_AGENT
+    }
 
     response = requests.get(
         url,
         headers=headers,
-        timeout=30,
-        **kwargs
+        timeout=30
     )
 
     response.raise_for_status()
+
     return response
 
 
-def discover_rss_url():
-    """
-    Kariyer Kapısı'nın RSS sayfasından
-    Infrastructure JavaScript dosyasını bulur.
-    """
+# ============================================================
+# RSS ADRESİNİ BUL
+# ============================================================
 
-    page_url = BASE + "/RSS/RssLinkiAl"
+def rss_adresini_bul():
 
-    response = get(page_url)
-    page = response.text
+    print("Kariyer Kapısı RSS sayfası okunuyor...")
 
-    scripts = re.findall(
+    rss_sayfasi = BASE_URL + "/RSS/RssLinkiAl"
+
+    response = get_url(rss_sayfasi)
+
+    html_text = response.text
+
+    scriptler = re.findall(
         r'<script[^>]+src=["\']([^"\']+)["\']',
-        page,
-        re.I
+        html_text,
+        re.IGNORECASE
     )
 
     infrastructure_url = None
 
-    for script in scripts:
+    for script in scriptler:
+
         if "Infrastructure" in script:
-            infrastructure_url = urljoin(BASE, script)
+
+            infrastructure_url = urljoin(
+                BASE_URL,
+                script
+            )
+
             break
 
-    if not infrastructure_url:
-        raise RuntimeError(
-            "Infrastructure JavaScript dosyası bulunamadı."
+    if infrastructure_url is None:
+
+        print(
+            "Infrastructure dosyası bulunamadı."
         )
 
-    print("Infrastructure:", infrastructure_url)
+        # Daha önce tespit ettiğimiz dosyayı kullan
+        infrastructure_url = (
+            BASE_URL
+            + "/js/Infrastructure.enxa2bxk74.js"
+        )
 
-    js = get(infrastructure_url).text
-
-    match = re.search(
-        r'kvkkbaseurl\s*[:=]\s*["\']([^"\']+)',
-        js,
-        re.I
+    print(
+        "Infrastructure:",
+        infrastructure_url
     )
 
-    if match:
-        base_url = match.group(1)
+    js_response = get_url(
+        infrastructure_url
+    )
+
+    js = js_response.text
+
+    # kvkkbaseurl değerini bul
+    eslesme = re.search(
+        r'kvkkbaseurl\s*[:=]\s*["\']([^"\']+)',
+        js,
+        re.IGNORECASE
+    )
+
+    if eslesme:
+
+        rss_base = eslesme.group(1)
+
     else:
-        base_url = BASE + "/"
 
-    if not base_url.endswith("/"):
-        base_url += "/"
+        # Kariyer Kapısı'nın mevcut yapısı
+        rss_base = BASE_URL + "/"
 
-    rss_url = base_url + "RSS"
+    if not rss_base.endswith("/"):
+
+        rss_base += "/"
+
+    rss_url = rss_base + "RSS"
 
     return rss_url
 
 
-def parse_rss(content):
-    """
-    RSS/Atom formatlarını okur.
-    """
+# ============================================================
+# RSS OKUMA
+# ============================================================
+
+def rss_oku(content):
 
     if isinstance(content, bytes):
+
         content = content.decode(
             "utf-8-sig",
             errors="replace"
         )
+
     else:
-        content = content.lstrip("\ufeff")
 
-    root = ET.fromstring(content)
+        content = content.lstrip(
+            "\ufeff"
+        )
 
-    items = []
+    root = ET.fromstring(
+        content
+    )
 
-    # Standart RSS
-    for item in root.findall(".//item"):
+    ilanlar = []
 
-        title = item.findtext("title", "")
-        link = item.findtext("link", "")
+    # --------------------------------------------------------
+    # RSS FORMAT
+    # --------------------------------------------------------
+
+    for item in root.findall(
+        ".//item"
+    ):
+
+        title = item.findtext(
+            "title",
+            ""
+        )
+
+        link = item.findtext(
+            "link",
+            ""
+        )
+
         description = item.findtext(
             "description",
             ""
         )
-        guid = item.findtext("guid", "")
 
-        items.append({
+        guid = item.findtext(
+            "guid",
+            ""
+        )
+
+        ilan = {
+
             "title": html.unescape(
                 title or ""
             ).strip(),
@@ -127,54 +193,69 @@ def parse_rss(content):
             ).strip(),
 
             "id": (
-                guid or link or title or ""
+                guid
+                or link
+                or title
+                or ""
             ).strip()
-        })
-
-    # Atom desteği
-    if not items:
-
-        ns = {
-            "atom": "http://www.w3.org/2005/Atom"
         }
 
-        for entry in root.findall(
+        ilanlar.append(
+            ilan
+        )
+
+    # --------------------------------------------------------
+    # ATOM FORMAT
+    # --------------------------------------------------------
+
+    if not ilanlar:
+
+        namespace = {
+            "atom":
+            "http://www.w3.org/2005/Atom"
+        }
+
+        entries = root.findall(
             ".//atom:entry",
-            ns
-        ):
+            namespace
+        )
+
+        for entry in entries:
 
             title = entry.findtext(
                 "atom:title",
                 "",
-                ns
+                namespace
             )
 
             summary = entry.findtext(
                 "atom:summary",
                 "",
-                ns
+                namespace
             )
 
             entry_id = entry.findtext(
                 "atom:id",
                 "",
-                ns
+                namespace
             )
 
             link = ""
 
             link_element = entry.find(
                 "atom:link",
-                ns
+                namespace
             )
 
             if link_element is not None:
+
                 link = link_element.attrib.get(
                     "href",
                     ""
                 )
 
-            items.append({
+            ilan = {
+
                 "title": html.unescape(
                     title or ""
                 ).strip(),
@@ -191,54 +272,75 @@ def parse_rss(content):
                     or title
                     or ""
                 ).strip()
-            })
+            }
 
-    return items
+            ilanlar.append(
+                ilan
+            )
+
+    return ilanlar
 
 
-def load_sent():
+# ============================================================
+# DAHA ÖNCE GÖNDERİLEN İLANLAR
+# ============================================================
 
-    if not os.path.exists(SENT_FILE):
+def gonderilenleri_oku():
+
+    if not os.path.exists(
+        GONDERILEN_DOSYA
+    ):
+
         return set()
 
     try:
 
         with open(
-            SENT_FILE,
+            GONDERILEN_DOSYA,
             "r",
             encoding="utf-8"
         ) as file:
 
-            return set(
-                json.load(file)
+            data = json.load(
+                file
             )
+
+            return set(data)
 
     except Exception:
 
         return set()
 
 
-def save_sent(sent):
+def gonderilenleri_kaydet(
+    gonderilenler
+):
 
     with open(
-        SENT_FILE,
+        GONDERILEN_DOSYA,
         "w",
         encoding="utf-8"
     ) as file:
 
         json.dump(
-            sorted(sent),
+            sorted(
+                gonderilenler
+            ),
             file,
             ensure_ascii=False,
             indent=2
         )
 
 
+# ============================================================
+# TÜRKÇE NORMALİZASYON
+# ============================================================
+
 def normalize(text):
 
     text = text.lower()
 
-    replacements = {
+    karakterler = {
         "ı": "i",
         "ğ": "g",
         "ü": "u",
@@ -247,25 +349,33 @@ def normalize(text):
         "ç": "c"
     }
 
-    for old, new in replacements.items():
+    for eski, yeni in karakterler.items():
+
         text = text.replace(
-            old,
-            new
+            eski,
+            yeni
         )
 
     return text
 
 
-def is_relevant(item):
+# ============================================================
+# İLAN UYGUNLUK KONTROLÜ
+# ============================================================
+
+def ilan_uygun_mu(ilan):
 
     text = normalize(
-        item["title"]
+        ilan["title"]
         + " "
-        + item["description"]
+        + ilan["description"]
     )
 
-    # Adalet alanıyla ilişkili kelimeler
-    alan_kelime = [
+    # --------------------------------------------------------
+    # ADALET / HUKUK ALANI
+    # --------------------------------------------------------
+
+    alanlar = [
 
         "adalet",
 
@@ -273,11 +383,11 @@ def is_relevant(item):
 
         "icra",
 
+        "katip",
+
         "zabit katibi",
 
         "zabita katibi",
-
-        "katip",
 
         "yazi isleri",
 
@@ -290,44 +400,412 @@ def is_relevant(item):
         "adalet bakanligi"
     ]
 
-    alan_uygun = any(
-        kelime in text
-        for kelime in alan_kelime
-    )
+    alan_uygun = False
+
+    for kelime in alanlar:
+
+        if kelime in text:
+
+            alan_uygun = True
+
+            break
 
     if not alan_uygun:
+
         return False
 
-    # Önlisans / Adalet eğitimi sinyalleri
-    onlisans = any(
-        kelime in text
-        for kelime in [
+    # --------------------------------------------------------
+    # ÖNLİSANS / ADALET
+    # --------------------------------------------------------
 
-            "onlisans",
+    egitimler = [
 
-            "on lisans",
+        "onlisans",
 
-            "adalet programi",
+        "on lisans",
 
-            "adalet bolumu",
+        "adalet programi",
 
-            "adalet mezunu"
-        ]
+        "adalet bolumu",
+
+        "adalet mezunu"
+    ]
+
+    egitim_uygun = False
+
+    for kelime in egitimler:
+
+        if kelime in text:
+
+            egitim_uygun = True
+
+            break
+
+    # --------------------------------------------------------
+    # KPSS
+    # --------------------------------------------------------
+
+    kpss_var = "kpss" in text
+
+    if not egitim_uygun and not kpss_var:
+
+        return False
+
+    # --------------------------------------------------------
+    # TABAN PUAN KONTROLÜ
+    # --------------------------------------------------------
+
+    # Burada karmaşık regex kullanmıyoruz.
+    #
+    # Örneğin:
+    # "KPSS 70 puan"
+    # "KPSS'den en az 70"
+    #
+    # gibi ifadelerde 70 değerini yakalamaya çalışıyoruz.
+
+    sayilar = re.findall(
+        r"\b\d{2}(?:[.,]\d+)?\b",
+        text
     )
 
-    # KPSS sinyali
-    kpss = "kpss" in text
+    for sayi in sayilar:
 
-    if not onlisans and not kpss:
-        return False
+        try:
 
-    # İlan açıkça 76.29'dan yüksek puan istiyorsa ele
-    score_patterns = [
+            puan = float(
+                sayi.replace(
+                    ",",
+                    "."
+                )
+            )
 
-        r"(?:taban|en az|minimum|min)\D{0,30}"
-        r"(\d{2}(?:[.,]\d+)?)",
+        except ValueError:
 
-        r"(\d{2}(?:[.,]\d+)?)"
-        r"\s*puan"
-        r"\s*(?:ve|veya)?"
-        r"\s*(?:uzeri|üstüo
+            continue
+
+        # 50-100 arası sayıları puan adayı olarak değerlendir
+        if 50 <= puan <= 100:
+
+            yakin_baslik = text[
+                max(
+                    0,
+                    text.find(sayi) - 80
+                ):
+                text.find(sayi) + 80
+            ]
+
+            if (
+                "kpss" in yakin_baslik
+                and puan > KPSS_PUANI
+            ):
+
+                return False
+
+    # --------------------------------------------------------
+    # BAŞVURU KAPANMIŞ MI?
+    # --------------------------------------------------------
+
+    kapanmis_ifadeler = [
+
+        "basvurular sona ermistir",
+
+        "basvuru sona ermistir",
+
+        "basvuru suresi dolmustur",
+
+        "son basvuru tarihi gecmistir",
+
+        "basvuruya kapalidir"
+    ]
+
+    for ifade in kapanmis_ifadeler:
+
+        if ifade in text:
+
+            return False
+
+    return True
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+def telegram_gonder(
+    mesaj
+):
+
+    url = (
+        "https://api.telegram.org/bot"
+        + TELEGRAM_TOKEN
+        + "/sendMessage"
+    )
+
+    data = {
+
+        "chat_id":
+            TELEGRAM_CHAT_ID,
+
+        "text":
+            mesaj,
+
+        "disable_web_page_preview":
+            False
+    }
+
+    response = requests.post(
+        url,
+        data=data,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+
+# ============================================================
+# TELEGRAM MESAJI
+# ============================================================
+
+def telegram_mesaji(
+    ilan
+):
+
+    aciklama = ilan[
+        "description"
+    ]
+
+    if len(aciklama) > 1800:
+
+        aciklama = (
+            aciklama[:1800]
+            + "..."
+        )
+
+    mesaj = (
+
+        "🔔 YENİ UYGUN KAMU İLANI\n\n"
+
+        "📌 "
+        + ilan["title"]
+        + "\n\n"
+
+        "📝 "
+        + aciklama
+        + "\n\n"
+
+        "🔗 "
+        + ilan["link"]
+    )
+
+    return mesaj
+
+
+# ============================================================
+# ANA PROGRAM
+# ============================================================
+
+def main():
+
+    print("")
+    print(
+        "======================================"
+    )
+
+    print(
+        "KAMU İLAN TAKİP BAŞLIYOR"
+    )
+
+    print(
+        "KPSS puanı:",
+        KPSS_PUANI
+    )
+
+    print(
+        "======================================"
+    )
+
+    # --------------------------------------------------------
+    # RSS ADRESİ
+    # --------------------------------------------------------
+
+    rss_url = rss_adresini_bul()
+
+    print(
+        "RSS:",
+        rss_url
+    )
+
+    # --------------------------------------------------------
+    # RSS'İ İNDİR
+    # --------------------------------------------------------
+
+    response = get_url(
+        rss_url
+    )
+
+    print(
+        "RSS HTTP:",
+        response.status_code
+    )
+
+    print(
+        "RSS uzunluğu:",
+        len(response.content)
+    )
+
+    # --------------------------------------------------------
+    # İLANLARI OKU
+    # --------------------------------------------------------
+
+    ilanlar = rss_oku(
+        response.content
+    )
+
+    print(
+        "Toplam ilan:",
+        len(ilanlar)
+    )
+
+    # --------------------------------------------------------
+    # DAHA ÖNCE GÖNDERİLENLER
+    # --------------------------------------------------------
+
+    gonderilenler = (
+        gonderilenleri_oku()
+    )
+
+    yeni_gonderilenler = set(
+        gonderilenler
+    )
+
+    uygun_sayisi = 0
+
+    telegram_sayisi = 0
+
+    # --------------------------------------------------------
+    # İLANLARI KONTROL ET
+    # --------------------------------------------------------
+
+    for ilan in ilanlar:
+
+        # ID yoksa hash üret
+        if not ilan["id"]:
+
+            ham_veri = (
+
+                ilan["title"]
+                + ilan["link"]
+                + ilan["description"]
+            )
+
+            ilan["id"] = hashlib.sha256(
+                ham_veri.encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+
+        # Daha önce gönderilmiş
+        if ilan["id"] in gonderilenler:
+
+            continue
+
+        # Uygun değil
+        if not ilan_uygun_mu(
+            ilan
+        ):
+
+            continue
+
+        uygun_sayisi += 1
+
+        print("")
+        print(
+            "UYGUN İLAN:"
+        )
+
+        print(
+            ilan["title"]
+        )
+
+        # ----------------------------------------------------
+        # TELEGRAM
+        # ----------------------------------------------------
+
+        try:
+
+            mesaj = telegram_mesaji(
+                ilan
+            )
+
+            telegram_gonder(
+                mesaj
+            )
+
+            print(
+                "Telegram mesajı gönderildi."
+            )
+
+            yeni_gonderilenler.add(
+                ilan["id"]
+            )
+
+            telegram_sayisi += 1
+
+        except Exception as hata:
+
+            print(
+                "Telegram gönderim hatası:"
+            )
+
+            print(
+                hata
+            )
+
+    # --------------------------------------------------------
+    # KAYDET
+    # --------------------------------------------------------
+
+    gonderilenleri_kaydet(
+        yeni_gonderilenler
+    )
+
+    # --------------------------------------------------------
+    # SONUÇ
+    # --------------------------------------------------------
+
+    print("")
+    print(
+        "======================================"
+    )
+
+    print(
+        "TARAMA TAMAMLANDI"
+    )
+
+    print(
+        "Toplam ilan:",
+        len(ilanlar)
+    )
+
+    print(
+        "Uygun yeni ilan:",
+        uygun_sayisi
+    )
+
+    print(
+        "Telegram'a gönderilen:",
+        telegram_sayisi
+    )
+
+    print(
+        "======================================"
+    )
+
+
+# ============================================================
+# PROGRAMI BAŞLAT
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
