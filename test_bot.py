@@ -1,6 +1,5 @@
 import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+import re
 
 URL = "https://kariyerkapisi.gov.tr/"
 
@@ -10,17 +9,22 @@ response = requests.get(
     timeout=30
 )
 
+html = response.text
+
 print("HTTP:", response.status_code)
+print("HTML:", len(html))
 
-soup = BeautifulSoup(response.text, "html.parser")
+print("\n--- İLGİLİ SATIRLAR ---")
 
-print("\n--- KARIYER KAPISI BAĞLANTILARI ---")
+for line in html.splitlines():
+    line_lower = line.lower()
 
-for link in soup.find_all("a", href=True):
-    href = urljoin(URL, link["href"])
-    text = link.get_text(" ", strip=True)
-
-    if "isealim" in href.lower() or "ilan" in href.lower():
-        print("YAZI:", text)
-        print("ADRES:", href)
-        print("---")
+    if any(x in line_lower for x in [
+        "api/",
+        "api.",
+        "ilan",
+        "job",
+        "announcement",
+        "isealim"
+    ]):
+        print(line.strip()[:1000])
