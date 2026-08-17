@@ -131,7 +131,10 @@ def parse_rss(content):
         content = content.decode(
             "utf-8-sig",
             errors="replace"
-        )
+        )for ilan in ilanlar[:3]:
+    print("BASLIK:", ilan["title"])
+    print("LINK:", ilan["link"])
+    print("-" * 60)
     else:
         content = content.lstrip("\ufeff")
 
