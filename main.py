@@ -1,3 +1,4 @@
+print("### MAIN.PY BAŞLADI ###", flush=True)
 import os
 import re
 import json
