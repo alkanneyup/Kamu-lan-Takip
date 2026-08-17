@@ -27,12 +27,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: İlanları tara
+      -       - name: İlanları tara
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python main.py
+          echo "=== ÇALIŞMA DİZİNİ ==="
+          pwd
+
+          echo "=== DOSYALAR ==="
+          ls -la
+
+          echo "=== MAIN.PY KONTROL ==="
+          test -f main.py
+          wc -l main.py
+
+          echo "=== MAIN.PY İLK 15 SATIR ==="
+          head -n 15 main.py
+
+          echo "=== PYTHON SÜRÜMÜ ==="
+          python --version
+
+          echo "=== PYTHON MAIN.PY ==="
+          python -u main.py
 
       - name: Gönderilen ilanları kaydet
         run: |
