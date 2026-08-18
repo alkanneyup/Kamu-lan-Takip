@@ -5,16 +5,16 @@ import html
 import hashlib
 import requests
 import xml.etree.ElementTree as ET
+from datetime import datetime, date
 from urllib.parse import urljoin
-
 
 # ============================================================
 # PROFİL
 # ============================================================
 
 BASE_URL = "https://kariyerkapisi.gov.tr"
-
 KPSS_PUANI = 76.29
+KPSS_TURU = "P93"
 OGRENIM = "onlisans"
 BOLUM = "adalet"
 CINSIYET = "erkek"
@@ -24,486 +24,225 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 GONDERILEN_DOSYA = "sent_ids.json"
-
-USER_AGENT = "Kamu-Ilan-Takip/Final-1.0"
+USER_AGENT = "Kamu-Ilan-Takip/Final-2.0"
 TIMEOUT = 30
 
+session = requests.Session()
+session.headers.update({
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+})
 
 # ============================================================
-# HTTP
-# ============================================================
-
-def get_url(url):
-    print("[HTTP]", url)
-
-    response = requests.get(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "*/*",
-        },
-        timeout=TIMEOUT,
-    )
-
-    print(
-        "[HTTP]",
-        response.status_code,
-        "|",
-        len(response.content),
-        "byte",
-    )
-
-    response.raise_for_status()
-
-    return response
-
-
-# ============================================================
-# NORMALİZASYON
+# YARDIMCILAR
 # ============================================================
 
 def normalize(text):
     if not text:
         return ""
-
     text = html.unescape(str(text)).lower()
-
     table = str.maketrans({
-        "ı": "i",
-        "ğ": "g",
-        "ü": "u",
-        "ş": "s",
-        "ö": "o",
-        "ç": "c",
+        "ı": "i", "ğ": "g", "ü": "u",
+        "ş": "s", "ö": "o", "ç": "c",
     })
-
     text = text.translate(table)
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    )
-
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
+def temiz_html(text):
+    if not text:
+        return ""
+    text = html.unescape(str(text))
+    text = re.sub(r"(?is)<script.*?</script>", " ", text)
+    text = re.sub(r"(?is)<style.*?</style>", " ", text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def get_url(url):
+    print("[HTTP]", url)
+    r = session.get(url, timeout=TIMEOUT, allow_redirects=True)
+    print("[HTTP]", r.status_code, "|", len(r.content), "byte")
+    r.raise_for_status()
+    return r
+
+
 # ============================================================
-# RSS ADRESİNİ BUL
+# RSS
 # ============================================================
 
 def rss_adresini_bul():
-
-    print("")
-    print("=== RSS ADRESİ BULMA ===")
-
-    sayfa = BASE_URL + "/RSS/RssLinkiAl"
-
-    response = get_url(sayfa)
-
-    scriptler = re.findall(
-        r'<script[^>]+src=["\']([^"\']+)["\']',
-        response.text,
-        re.IGNORECASE,
-    )
-
-    print(
-        "[RSS] Script sayısı:",
-        len(scriptler),
-    )
-
-    infrastructure = None
-
-    for script in scriptler:
-
-        if "Infrastructure" in script:
-
-            infrastructure = urljoin(
-                BASE_URL,
-                script,
-            )
-
-            break
-
-    if not infrastructure:
-
-        infrastructure = (
-            BASE_URL
-            + "/js/Infrastructure.enxa2bxk74.js"
+    print("\n=== RSS ADRESİ BULMA ===")
+    try:
+        r = get_url(BASE_URL + "/RSS/RssLinkiAl")
+        scripts = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']',
+                             r.text, re.I)
+        infrastructure = next(
+            (urljoin(BASE_URL, x) for x in scripts if "Infrastructure" in x),
+            BASE_URL + "/js/Infrastructure.enxa2bxk74.js"
         )
+        print("[RSS] Infrastructure:", infrastructure)
 
-    print(
-        "[RSS] Infrastructure:",
-        infrastructure,
-    )
+        js = get_url(infrastructure).text
+        m = re.search(r'kvkkbaseurl\s*[:=]\s*["\']([^"\']+)',
+                      js, re.I)
+        base = m.group(1) if m else BASE_URL + "/"
+        if not base.endswith("/"):
+            base += "/"
+        rss = base + "RSS"
+        print("[RSS] Son RSS adresi:", rss)
+        return rss
+    except Exception as e:
+        print("[UYARI] RSS adresi otomatik bulunamadı:", e)
+        return BASE_URL + "/RSS"
 
-    js_response = get_url(
-        infrastructure
-    )
-
-    js = js_response.text
-
-    eslesme = re.search(
-        r'kvkkbaseurl\s*[:=]\s*["\']([^"\']+)',
-        js,
-        re.IGNORECASE,
-    )
-
-    if eslesme:
-
-        base = eslesme.group(1)
-
-    else:
-
-        base = BASE_URL + "/"
-
-    if not base.endswith("/"):
-
-        base += "/"
-
-    rss_url = base + "RSS"
-
-    print(
-        "[RSS] Son RSS adresi:",
-        rss_url,
-    )
-
-    return rss_url
-
-
-# ============================================================
-# RSS OKUMA
-# ============================================================
 
 def rss_oku(content):
-
-    print("")
-    print("=== RSS OKUMA ===")
-
     if isinstance(content, bytes):
-
-        content = content.decode(
-            "utf-8-sig",
-            errors="replace",
-        )
-
-    else:
-
-        content = str(
-            content
-        ).lstrip("\ufeff")
-
-    root = ET.fromstring(
-        content
-    )
-
+        content = content.decode("utf-8-sig", errors="replace")
+    root = ET.fromstring(content)
     ilanlar = []
 
-    # --------------------------------------------------------
-    # RSS
-    # --------------------------------------------------------
-
-    for item in root.findall(
-        ".//item"
-    ):
-
-        title = item.findtext(
-            "title",
-            "",
-        ) or ""
-
-        link = item.findtext(
-            "link",
-            "",
-        ) or ""
-
-        description = item.findtext(
-            "description",
-            "",
-        ) or ""
-
-        guid = item.findtext(
-            "guid",
-            "",
-        ) or ""
-
+    for item in root.findall(".//item"):
+        title = item.findtext("title", "") or ""
+        link = item.findtext("link", "") or ""
+        desc = item.findtext("description", "") or ""
+        guid = item.findtext("guid", "") or ""
         ilanlar.append({
-
-            "title":
-                html.unescape(
-                    title
-                ).strip(),
-
-            "link":
-                link.strip(),
-
-            "description":
-                html.unescape(
-                    description
-                ).strip(),
-
-            "id":
-                (
-                    guid
-                    or link
-                    or title
-                ).strip(),
-
+            "title": html.unescape(title).strip(),
+            "link": link.strip(),
+            "description": html.unescape(desc).strip(),
+            "id": (guid or link or title).strip(),
         })
 
-    # --------------------------------------------------------
-    # ATOM
-    # --------------------------------------------------------
-
     if not ilanlar:
-
-        namespace = {
-            "atom":
-                "http://www.w3.org/2005/Atom"
-        }
-
-        entries = root.findall(
-            ".//atom:entry",
-            namespace,
-        )
-
-        for entry in entries:
-
-            title = entry.findtext(
-                "atom:title",
-                "",
-                namespace,
-            ) or ""
-
-            summary = entry.findtext(
-                "atom:summary",
-                "",
-                namespace,
-            ) or ""
-
-            entry_id = entry.findtext(
-                "atom:id",
-                "",
-                namespace,
-            ) or ""
-
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall(".//a:entry", ns):
+            title = entry.findtext("a:title", "", ns) or ""
+            summary = entry.findtext("a:summary", "", ns) or ""
+            eid = entry.findtext("a:id", "", ns) or ""
             link = ""
-
-            link_element = entry.find(
-                "atom:link",
-                namespace,
-            )
-
-            if link_element is not None:
-
-                link = (
-                    link_element
-                    .attrib
-                    .get(
-                        "href",
-                        "",
-                    )
-                )
-
+            le = entry.find("a:link", ns)
+            if le is not None:
+                link = le.attrib.get("href", "")
             ilanlar.append({
-
-                "title":
-                    html.unescape(
-                        title
-                    ).strip(),
-
-                "link":
-                    link.strip(),
-
-                "description":
-                    html.unescape(
-                        summary
-                    ).strip(),
-
-                "id":
-                    (
-                        entry_id
-                        or link
-                        or title
-                    ).strip(),
-
+                "title": html.unescape(title).strip(),
+                "link": link.strip(),
+                "description": html.unescape(summary).strip(),
+                "id": (eid or link or title).strip(),
             })
 
-    print(
-        "[RSS] Toplam ilan:",
-        len(ilanlar),
-    )
-
+    print("[RSS] Toplam ilan:", len(ilanlar))
     return ilanlar
 
 
 # ============================================================
-# GÖNDERİLEN İLANLAR
+# İLAN DETAYI
+# ============================================================
+
+def detay_metni_al(ilan):
+    link = ilan.get("link", "").strip()
+    if not link.startswith("http"):
+        return ""
+
+    try:
+        r = get_url(link)
+        text = temiz_html(r.text)
+        if len(text) > 120000:
+            text = text[:120000]
+        print("[DETAY] Metin:", len(text), "karakter")
+        return text
+    except Exception as e:
+        print("[DETAY] Okunamadı:", e)
+        return ""
+
+
+# ============================================================
+# GÖNDERİLENLER
 # ============================================================
 
 def gonderilenleri_oku():
-
-    if not os.path.exists(
-        GONDERILEN_DOSYA
-    ):
-
+    if not os.path.exists(GONDERILEN_DOSYA):
+        return set()
+    try:
+        with open(GONDERILEN_DOSYA, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return set(str(x) for x in data) if isinstance(data, list) else set()
+    except Exception as e:
+        print("[UYARI] sent_ids okunamadı:", e)
         return set()
 
-    try:
 
-        with open(
-            GONDERILEN_DOSYA,
-            "r",
-            encoding="utf-8",
-        ) as file:
+def gonderilenleri_kaydet(ids):
+    with open(GONDERILEN_DOSYA, "w", encoding="utf-8") as f:
+        json.dump(sorted(ids), f, ensure_ascii=False, indent=2)
 
-            data = json.load(
-                file
-            )
-
-        if isinstance(
-            data,
-            list,
-        ):
-
-            return set(
-                str(x)
-                for x in data
-            )
-
-    except Exception as hata:
-
-        print(
-            "[UYARI] sent_ids okunamadı:",
-            hata,
-        )
-
-    return set()
-
-
-def gonderilenleri_kaydet(
-    gonderilenler
-):
-
-    with open(
-        GONDERILEN_DOSYA,
-        "w",
-        encoding="utf-8",
-    ) as file:
-
-        json.dump(
-            sorted(
-                gonderilenler
-            ),
-            file,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-
-# ============================================================
-# İLAN ID
-# ============================================================
 
 def ilan_id(ilan):
-
-    mevcut = ilan.get(
-        "id",
-        "",
-    )
-
-    if mevcut:
-
-        return str(
-            mevcut
-        )
-
-    ham = (
-        ilan.get(
-            "title",
-            "",
-        )
-        + "|"
-        + ilan.get(
-            "link",
-            "",
-        )
-        + "|"
-        + ilan.get(
-            "description",
-            "",
-        )
-    )
-
-    return hashlib.sha256(
-        ham.encode(
-            "utf-8"
-        )
-    ).hexdigest()
-
-
-# ============================================================
-# İLAN METNİ
-# ============================================================
-
-def ilan_metni(ilan):
-
-    return normalize(
-        (
-            ilan.get(
-                "title",
-                "",
-            )
-            + " "
-            + ilan.get(
-                "description",
-                "",
-            )
-        )
-    )
+    value = ilan.get("id", "").strip()
+    if value:
+        return value
+    raw = "|".join([
+        ilan.get("title", ""),
+        ilan.get("link", ""),
+        ilan.get("description", ""),
+    ])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 # ============================================================
 # BAŞVURU TARİHİ
 # ============================================================
 
+TARIH_PATTERNS = [
+    r"son\s+basvuru\s+tarihi\s*[:\-]?\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})",
+    r"son\s+basvuru\s*[:\-]?\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})",
+    r"basvurular\s+(\d{1,2}[./-]\d{1,2}[./-]\d{4}).{0,100}(\d{1,2}[./-]\d{1,2}[./-]\d{4})",
+]
+
+
+def tarih_parse(s):
+    try:
+        s = s.replace("-", ".").replace("/", ".")
+        d, m, y = [int(x) for x in s.split(".")]
+        return date(y, m, d)
+    except Exception:
+        return None
+
+
 def tarih_kontrol(text):
-
-    kapanmis_ifadeler = [
-
+    kapali = [
         "basvurular sona ermistir",
-
         "basvuru sona ermistir",
-
         "basvuru suresi dolmustur",
-
         "basvuru suresi sona ermistir",
-
-        "son basvuru tarihi gecmistir",
-
         "basvuruya kapalidir",
-
         "basvurular kapanmistir",
-
         "basvuru kapatilmistir",
-
     ]
+    for x in kapali:
+        if x in text:
+            return False, None, "İlan metni başvurunun kapandığını belirtiyor."
 
-    for ifade in kapanmis_ifadeler:
+    son = None
+    for pattern in TARIH_PATTERNS:
+        for m in re.finditer(pattern, text, re.I):
+            vals = m.groups()
+            candidates = [tarih_parse(x) for x in vals if x]
+            candidates = [x for x in candidates if x]
+            if candidates:
+                candidate = max(candidates)
+                if son is None or candidate > son:
+                    son = candidate
 
-        if ifade in text:
-
-            return (
-                False,
-                [
-                    "Başvuru süresinin sona erdiğini belirten ifade bulundu."
-                ],
-            )
-
-    return (
-        True,
-        [],
-    )
+    if son and son < date.today():
+        return False, son, f"Son başvuru tarihi {son.strftime('%d.%m.%Y')} geçmiş."
+    if son:
+        return True, son, f"Son başvuru: {son.strftime('%d.%m.%Y')}."
+    return True, None, "Son başvuru tarihi otomatik tespit edilemedi."
 
 
 # ============================================================
@@ -511,129 +250,56 @@ def tarih_kontrol(text):
 # ============================================================
 
 def kpss_kontrol(text):
-
     if "kpss" not in text:
+        return True, None, None, ["KPSS şartı tespit edilmedi."]
 
-        return {
-            "var": False,
-            "taban": None,
-            "puan_turu": None,
-            "manuel": False,
-            "neden": [
-                "KPSS şartı tespit edilmedi."
-            ],
-        }
+    # Önce P93/P94/P3 gibi puan türünü bul.
+    turler = re.findall(r"\bP\s*([0-9]{1,3})\b", text, re.I)
+    turler = ["P" + x for x in turler]
 
-    puan_turu = None
+    # P93 açıkça geçiyorsa onu esas al.
+    if turler and "P93" not in turler:
+        # P3/P94 gibi başka puan türü açıkça zorunluysa,
+        # bunu aday açısından uygun kabul etmiyoruz.
+        if any(x in ("P3", "P94", "P95", "P96", "P97", "P99") for x in turler):
+            return False, None, turler[0], [
+                "İlanda P93 yerine farklı bir KPSS puan türü açıkça belirtilmiş."
+            ]
 
-    tur_match = re.search(
-        r"\bP\s*([0-9]{2})\b",
-        text,
-        re.IGNORECASE,
-    )
-
-    if tur_match:
-
-        puan_turu = (
-            "P"
-            + tur_match.group(1)
-        )
-
-    # KPSS kelimesinden sonraki yaklaşık
-    # 250 karakter içinde bulunan 50-100
-    # arası sayıları değerlendir.
+    # "en az 70 KPSS", "KPSSP93 70", "KPSS 70 puan"
     sayilar = []
+    for m in re.finditer(r"(?:kpss(?:p\d{1,3})?|p93).{0,180}", text):
+        bolge = m.group(0)
+        for n in re.findall(r"\b(\d{2}(?:[.,]\d+)?)\b", bolge):
+            try:
+                v = float(n.replace(",", "."))
+                if 40 <= v <= 100:
+                    sayilar.append(v)
+            except ValueError:
+                pass
 
-    for match in re.finditer(
-        r"kpss",
-        text,
-    ):
+    # Çoklu sayılarda en düşük sayı çoğunlukla taban puandır.
+    # Başka tarih/sayıların yanlış alınmasını azaltmak için yalnızca
+    # KPSS bağlamındaki sayıları kullanıyoruz.
+    taban = min(sayilar) if sayilar else None
 
-        bolge = text[
-            match.start():
-            match.start() + 300
+    if taban is None:
+        return True, None, "P93", [
+            "KPSS şartı var; ancak taban puan metinden güvenilir biçimde çıkarılamadı."
         ]
 
-        bulunan = re.findall(
-            r"\b\d{2}(?:[.,]\d+)?\b",
-            bolge,
-        )
+    if "P93" in turler or not turler:
+        if taban > KPSS_PUANI:
+            return False, taban, "P93", [
+                f"KPSS tabanı {taban}; aday puanı {KPSS_PUANI}."
+            ]
+        return True, taban, "P93", [
+            f"KPSS tabanı {taban}; aday puanı {KPSS_PUANI} yeterli."
+        ]
 
-        for sayi in bulunan:
-
-            try:
-
-                deger = float(
-                    sayi.replace(
-                        ",",
-                        ".",
-                    )
-                )
-
-            except ValueError:
-
-                continue
-
-            if 50 <= deger <= 100:
-
-                sayilar.append(
-                    deger
-                )
-
-    if not sayilar:
-
-        return {
-            "var": True,
-            "taban": None,
-            "puan_turu": puan_turu,
-            "manuel": True,
-            "neden": [
-                "KPSS şartı var ancak taban puan otomatik olarak belirlenemedi."
-            ],
-        }
-
-    taban = min(
-        sayilar
-    )
-
-    if taban > KPSS_PUANI:
-
-        return {
-            "var": True,
-            "taban": taban,
-            "puan_turu": puan_turu,
-            "manuel": False,
-            "neden": [
-                (
-                    f"KPSS tabanı {taban}; "
-                    f"puanınız {KPSS_PUANI}. "
-                    "Puan yetersiz."
-                )
-            ],
-        }
-
-    neden = [
-        (
-            f"KPSS tabanı {taban}; "
-            f"puanınız {KPSS_PUANI}. "
-            "Puan yeterli."
-        )
+    return False, taban, turler[0], [
+        f"KPSS puan türü {turler[0]}; adayın kullanılacak puanı P93."
     ]
-
-    if puan_turu:
-
-        neden.append(
-            "Puan türü: "
-            + puan_turu
-        )
-
-    return {
-        "var": True,
-        "taban": taban,
-        "puan_turu": puan_turu,
-        "manuel": False,
-        "neden": neden,
-    }
 
 
 # ============================================================
@@ -641,138 +307,34 @@ def kpss_kontrol(text):
 # ============================================================
 
 def ogrenim_kontrol(text):
-
-    # Lisans açıkça zorunluysa
-    # önlisans mezunu için uygun değildir.
-
     lisans_zorunlu = [
-
         "lisans mezunu olmak",
-
         "lisans mezunlarindan",
-
         "lisans mezunlarından",
-
         "en az lisans",
-
         "lisans mezuniyeti",
-
+        "lisans programlarindan",
+        "lisans programlarından",
     ]
+    if any(x in text for x in lisans_zorunlu):
+        return False, ["Lisans mezuniyeti zorunlu."]
 
-    for ifade in lisans_zorunlu:
-
-        if ifade in text:
-
-            return {
-                "ok": False,
-                "manuel": False,
-                "neden": [
-                    "İlan lisans mezuniyeti istiyor."
-                ],
-            }
-
-    # Herhangi bir önlisans
-    # özellikle kabul edilmeli.
-
-    genel_onlisans = [
-
-        "herhangi bir onlisans",
-
-        "herhangi bir on lisans",
-
-        "herhangi bir onlisans programi",
-
-        "herhangi bir on lisans programi",
-
-        "onlisans mezunu olmak",
-
-        "on lisans mezunu olmak",
-
-        "onlisans mezunlarindan",
-
-        "on lisans mezunlarindan",
-
-        "onlisans mezuniyeti",
-
-        "on lisans mezuniyeti",
-
+    onlisans = [
+        "onlisans",
+        "on lisans",
         "onlisans mezunu",
-
         "on lisans mezunu",
-
+        "onlisans mezunlarindan",
+        "on lisans mezunlarindan",
+        "onlisans programi",
+        "on lisans programi",
+        "onlisans mezuniyeti",
     ]
+    if any(x in text for x in onlisans):
+        return True, ["Önlisans şartı bulunuyor."]
 
-    for ifade in genel_onlisans:
-
-        if ifade in text:
-
-            return {
-                "ok": True,
-                "manuel": False,
-                "neden": [
-                    "Herhangi bir önlisans mezuniyeti kabul ediliyor."
-                ],
-            }
-
-    # Adalet açıkça isteniyorsa
-
-    adalet = [
-
-        "adalet bolumu",
-
-        "adalet programi",
-
-        "adalet mezunu",
-
-        "adalet mezunlarindan",
-
-        "adalet onlisans",
-
-        "adalet on lisans",
-
-    ]
-
-    for ifade in adalet:
-
-        if ifade in text:
-
-            return {
-                "ok": True,
-                "manuel": False,
-                "neden": [
-                    "Adalet mezuniyeti şartı profilinizle uyumlu."
-                ],
-            }
-
-    # Önlisans kelimesi geçiyorsa
-    # ama detay çözülemiyorsa manuel.
-
-    if (
-        "onlisans" in text
-        or "on lisans" in text
-    ):
-
-        return {
-            "ok": True,
-            "manuel": True,
-            "neden": [
-                "Önlisans şartı bulunuyor ancak alt nitelik otomatik çözülemedi."
-            ],
-        }
-
-    # Eğitim şartı hiç bulunmuyorsa
-    # kesin olarak reddetme.
-    #
-    # Çünkü bazı ilanların RSS açıklaması
-    # eksik olabiliyor.
-
-    return {
-        "ok": True,
-        "manuel": True,
-        "neden": [
-            "Eğitim şartı RSS metninde kesin çözülemedi; ilan ayrıntısı kontrol edilmeli."
-        ],
-    }
+    # Eğitim seviyesi hiç geçmiyorsa bunu otomatik red etmiyoruz.
+    return True, ["Eğitim seviyesi metinde açıkça tespit edilemedi; dışlanmadı."]
 
 
 # ============================================================
@@ -780,152 +342,67 @@ def ogrenim_kontrol(text):
 # ============================================================
 
 def bolum_kontrol(text):
-
-    # Herhangi bir bölüm / alan
-    # kabul ediliyorsa Adalet mezunu uygundur.
-
+    # Açıkça genel bölüm/alan şartı yoksa Adalet mezununu dışlama.
     genel = [
-
         "herhangi bir bolum",
-
-        "herhangi bir bölüm",
-
         "herhangi bir alan",
-
         "bolum sarti aranmaksizin",
-
         "alan sarti aranmaksizin",
-
         "brans sarti aranmaksizin",
-
         "herhangi bir onlisans",
-
         "herhangi bir on lisans",
-
+        "onlisans mezunu olmak",
+        "on lisans mezunu olmak",
     ]
-
-    for ifade in genel:
-
-        if ifade in text:
-
-            return {
-                "ok": True,
-                "manuel": False,
-                "neden": [
-                    "Belirli bir bölüm şartı bulunmuyor."
-                ],
-            }
-
-    # Adalet
+    if any(x in text for x in genel):
+        return True, ["Belirli bir bölüm şartı yok; Adalet mezunu başvurabilir."]
 
     adalet = [
-
         "adalet bolumu",
-
         "adalet programi",
-
         "adalet mezunu",
-
         "adalet mezunlarindan",
-
         "adalet onlisans",
-
         "adalet on lisans",
-
+        "adalet programından",
     ]
+    if any(x in text for x in adalet):
+        return True, ["Adalet bölümü/programı kabul ediliyor."]
 
-    for ifade in adalet:
-
-        if ifade in text:
-
-            return {
-                "ok": True,
-                "manuel": False,
-                "neden": [
-                    "Adalet mezuniyeti kabul ediliyor."
-                ],
-            }
-
-    # Bazı belirgin farklı bölümler
-
-    farkli_bolumler = [
-
+    # Adalet ile açıkça bağdaşmayan özel nitelikler.
+    farkli = [
         "bilgisayar muhendisligi",
-
-        "bilgisayar programciligi",
-
+        "bilgisayar mühendisligi",
         "yazilim muhendisligi",
-
         "elektrik elektronik muhendisligi",
-
-        "maliye",
-
-        "iktisat",
-
-        "isletme",
-
+        "makine muhendisligi",
+        "insaat muhendisligi",
+        "muhendislik fakultesi",
+        "bilgisayar programciligi",
         "muhasebe",
-
-        "cocuk gelisimi",
-
-        "sosyal hizmet",
-
         "laborant",
-
         "anestezi",
-
         "ilk ve acil yardim",
-
         "tibbi dokumantasyon",
-
+        "cocuk gelisimi",
+        "sosyal hizmet",
         "grafik tasarim",
-
         "web tasarim",
-
+        "paramedik",
+        "ebe",
+        "hemsire",
     ]
-
-    bulunan = []
-
-    for ifade in farkli_bolumler:
-
-        if ifade in text:
-
-            bulunan.append(
-                ifade
-            )
-
+    bulunan = sorted(set(x for x in farkli if x in text))
     if bulunan:
+        return False, [
+            "Adalet dışındaki özel bölüm/nitelik isteniyor: "
+            + ", ".join(bulunan)
+        ]
 
-        return {
-            "ok": False,
-            "manuel": False,
-            "neden": [
-                (
-                    "Adalet dışındaki özel bölüm/nitelik isteniyor: "
-                    + ", ".join(
-                        sorted(
-                            set(
-                                bulunan
-                            )
-                        )
-                    )
-                )
-            ],
-        }
-
-    # Hiçbir bölüm ifadesi yoksa
-    # otomatik reddetme.
-    #
-    # Bu bizim için önemli:
-    # bölüm şartı olmayan ilanları kaçırmıyoruz.
-
-    return {
-        "ok": True,
-        "manuel": True,
-        "neden": [
-            "Belirli bölüm şartı tespit edilmedi; ilan ayrıntısı kontrol edilmeli."
-        ],
-    }
+    # Kritik kural: Bölüm belirtilmiyorsa Adalet mezununu dışlama.
+    return True, [
+        "Belirli bir bölüm şartı tespit edilmedi; Adalet mezunu dışlanmadı."
+    ]
 
 
 # ============================================================
@@ -933,72 +410,30 @@ def bolum_kontrol(text):
 # ============================================================
 
 def cinsiyet_kontrol(text):
-
     if CINSIYET == "erkek":
-
         kadin = [
-
             "sadece kadin",
-
-            "sadece kadın",
-
             "kadin adaylar",
-
+            "kadin aday",
             "kadın adaylar",
-
+            "kadın aday",
             "kadin olmak",
-
             "kadın olmak",
-
-            "adaylarin kadin",
-
-            "adayların kadın",
-
         ]
+        if any(x in text for x in kadin):
+            return False, ["İlan yalnızca kadın adaylara açık."]
 
-        for ifade in kadin:
-
-            if ifade in text:
-
-                return {
-                    "ok": False,
-                    "manuel": False,
-                    "neden": [
-                        "İlan kadın adaylarla sınırlandırılmış."
-                    ],
-                }
-
+    if CINSIYET == "kadin":
         erkek = [
-
             "sadece erkek",
-
             "erkek adaylar",
-
             "erkek aday",
-
             "erkek olmak",
-
         ]
+        if any(x in text for x in erkek):
+            return False, ["İlan yalnızca erkek adaylara açık."]
 
-        for ifade in erkek:
-
-            if ifade in text:
-
-                return {
-                    "ok": True,
-                    "manuel": False,
-                    "neden": [
-                        "Erkek aday şartı profilinizle uyumlu."
-                    ],
-                }
-
-    return {
-        "ok": True,
-        "manuel": False,
-        "neden": [
-            "Cinsiyet açısından engel tespit edilmedi."
-        ],
-    }
+    return True, ["Cinsiyet açısından engel tespit edilmedi."]
 
 
 # ============================================================
@@ -1006,436 +441,108 @@ def cinsiyet_kontrol(text):
 # ============================================================
 
 def yas_kontrol(text):
-
-    # 30 yaşından gün almamış
-    # gibi ifadeler için özel kontrol.
-
-    match = re.search(
-        r"(\d{2})\s*yasindan\s*gun\s*almamis",
-        text,
-    )
-
-    if match:
-
-        limit = int(
-            match.group(1)
-        )
-
-        if YAS >= limit:
-
-            return {
-                "ok": False,
-                "manuel": False,
-                "neden": [
-                    (
-                        f"İlan {limit} yaşından gün almamış olmayı istiyor; "
-                        f"yaşınız {YAS}."
-                    )
-                ],
-            }
-
-        return {
-            "ok": True,
-            "manuel": False,
-            "neden": [
-                (
-                    f"Yaş şartı {limit}; "
-                    f"yaşınız {YAS}."
-                )
-            ],
-        }
-
-    # "35 yaşını doldurmamış"
-    match = re.search(
-        r"(\d{2})\s*yasini\s*doldurmamis",
-        text,
-    )
-
-    if match:
-
-        limit = int(
-            match.group(1)
-        )
-
-        if YAS >= limit:
-
-            return {
-                "ok": False,
-                "manuel": False,
-                "neden": [
-                    (
-                        f"İlan {limit} yaşını doldurmamış olmayı istiyor; "
-                        f"yaşınız {YAS}."
-                    )
-                ],
-            }
-
-        return {
-            "ok": True,
-            "manuel": False,
-            "neden": [
-                (
-                    f"Yaş sınırı {limit}; "
-                    f"yaşınız {YAS}."
-                )
-            ],
-        }
-
-    # "30 yaşından büyük olmamak"
-    match = re.search(
-        r"(\d{2})\s*yasindan\s*buyuk",
-        text,
-    )
-
-    if match:
-
-        limit = int(
-            match.group(1)
-        )
-
-        if YAS <= limit:
-
-            return {
-                "ok": True,
-                "manuel": False,
-                "neden": [
-                    (
-                        f"Yaş şartı açısından uygunsunuz; "
-                        f"yaşınız {YAS}."
-                    )
-                ],
-            }
-
-        return {
-            "ok": False,
-            "manuel": False,
-            "neden": [
-                (
-                    f"Yaş sınırı {limit}; "
-                    f"yaşınız {YAS}."
-                )
-            ],
-        }
-
-    return {
-        "ok": True,
-        "manuel": False,
-        "neden": [
-            "Yaş sınırı tespit edilmedi."
-        ],
-    }
-
-
-# ============================================================
-# ASKERLİK
-# ============================================================
-
-def askerlik_kontrol(text):
-
-    if "askerlik" not in text:
-
-        return {
-            "ok": True,
-            "manuel": False,
-            "neden": [],
-        }
-
-    ifadeler = [
-
-        "askerligini yapmis olmak",
-
-        "askerliği yapmış olmak",
-
-        "askerlik hizmetini yapmis",
-
-        "askerlik hizmetini yapmış",
-
-        "askerlikle iliskisi bulunmamak",
-
-        "askerlikle ilişkisi bulunmamak",
-
+    # 30 yaşından gün almamış / 30 yaşını doldurmamış
+    patterns = [
+        (r"(\d{1,2})\s*yasindan\s*gun\s*almamis", "gun_almamis"),
+        (r"(\d{1,2})\s*yasini\s*doldurmamis", "doldurmamis"),
+        (r"(\d{1,2})\s*yasini\s*gecmemis", "gecmemis"),
+        (r"(\d{1,2})\s*yasindan\s*buyuk\s*olmamak", "buyuk_olmamak"),
     ]
 
-    for ifade in ifadeler:
+    for pattern, kind in patterns:
+        m = re.search(pattern, text)
+        if not m:
+            continue
 
-        if normalize(ifade) in text:
+        limit = int(m.group(1))
 
-            return {
-                "ok": True,
-                "manuel": True,
-                "neden": [
-                    "Askerlik şartı bulunuyor; kişisel durum ayrıca kontrol edilmeli."
-                ],
-            }
+        if kind == "gun_almamis":
+            ok = YAS < limit
+        else:
+            ok = YAS < limit
 
-    return {
-        "ok": True,
-        "manuel": True,
-        "neden": [
-            "İlanda askerlik şartı geçiyor; ayrıntısı manuel kontrol edilmeli."
-        ],
-    }
+        if ok:
+            return True, [f"Yaş sınırı {limit}; aday yaşı {YAS}."]
+        return False, [f"İlan {limit} yaş sınırı koyuyor; aday yaşı {YAS}."]
+
+    # "35 yaşından büyük olmamak" / "35 yaşını geçmemiş"
+    m = re.search(r"(\d{1,2})\s*yasindan\s*buyuk\s*olmamak", text)
+    if m:
+        limit = int(m.group(1))
+        ok = YAS <= limit
+        return ok, [f"Yaş sınırı {limit}; aday yaşı {YAS}."]
+
+    return True, ["Yaş açısından engel tespit edilmedi."]
 
 
 # ============================================================
-# ANA İLAN ANALİZİ
+# ANALİZ
 # ============================================================
 
-def ilan_analiz_et(ilan):
+def analiz_et(ilan):
+    baslik = normalize(ilan.get("title", ""))
+    rss = normalize(ilan.get("description", ""))
+    detay = normalize(ilan.get("detail_text", ""))
 
-    text = ilan_metni(
-        ilan
-    )
-
+    text = " ".join(x for x in [baslik, rss, detay] if x)
     neden = []
+    red = []
 
-    # --------------------------------------------------------
-    # TARİH
-    # --------------------------------------------------------
-
-    tarih_ok, tarih_neden = (
-        tarih_kontrol(
-            text
-        )
-    )
-
+    tarih_ok, son_tarih, tarih_nedeni = tarih_kontrol(text)
+    neden.append(tarih_nedeni)
     if not tarih_ok:
+        red.append(tarih_nedeni)
 
-        return {
-            "durum":
-                "BASVURAMAZSIN",
+    k_ok, k_taban, k_tur, k_neden = kpss_kontrol(text)
+    neden.extend(k_neden)
+    if not k_ok:
+        red.extend(k_neden)
 
-            "kpss":
-                False,
+    o_ok, o_neden = ogrenim_kontrol(text)
+    neden.extend(o_neden)
+    if not o_ok:
+        red.extend(o_neden)
 
-            "taban":
-                None,
+    b_ok, b_neden = bolum_kontrol(text)
+    neden.extend(b_neden)
+    if not b_ok:
+        red.extend(b_neden)
 
-            "neden":
-                tarih_neden,
-        }
+    c_ok, c_neden = cinsiyet_kontrol(text)
+    neden.extend(c_neden)
+    if not c_ok:
+        red.extend(c_neden)
 
-    neden.extend(
-        tarih_neden
+    y_ok, y_neden = yas_kontrol(text)
+    neden.extend(y_neden)
+    if not y_ok:
+        red.extend(y_neden)
+
+    # Gerçekten çözülemeyen tek önemli durum:
+    # KPSS şartı var ama puan türü/tabanı belirsiz.
+    manuel = (
+        k_ok
+        and "KPSS şartı var; ancak taban puan metinden güvenilir biçimde çıkarılamadı." in k_neden
+        and "P93" not in text
+        and "puan siralamasi" not in text
+        and "puan sıralaması" not in text
     )
 
-    # --------------------------------------------------------
-    # KPSS
-    # --------------------------------------------------------
-
-    kpss = kpss_kontrol(
-        text
-    )
-
-    neden.extend(
-        kpss["neden"]
-    )
-
-    if (
-        kpss["var"]
-        and kpss["taban"] is not None
-        and kpss["taban"] > KPSS_PUANI
-    ):
-
-        return {
-            "durum":
-                "BASVURAMAZSIN",
-
-            "kpss":
-                True,
-
-            "taban":
-                kpss["taban"],
-
-            "neden":
-                neden,
-        }
-
-    # --------------------------------------------------------
-    # ÖĞRENİM
-    # --------------------------------------------------------
-
-    ogrenim = (
-        ogrenim_kontrol(
-            text
-        )
-    )
-
-    neden.extend(
-        ogrenim["neden"]
-    )
-
-    if not ogrenim["ok"]:
-
-        return {
-            "durum":
-                "BASVURAMAZSIN",
-
-            "kpss":
-                kpss["var"],
-
-            "taban":
-                kpss["taban"],
-
-            "neden":
-                neden,
-        }
-
-    # --------------------------------------------------------
-    # BÖLÜM
-    # --------------------------------------------------------
-
-    bolum = (
-        bolum_kontrol(
-            text
-        )
-    )
-
-    neden.extend(
-        bolum["neden"]
-    )
-
-    if not bolum["ok"]:
-
-        return {
-            "durum":
-                "BASVURAMAZSIN",
-
-            "kpss":
-                kpss["var"],
-
-            "taban":
-                kpss["taban"],
-
-            "neden":
-                neden,
-        }
-
-    #--------------------------------------------------------
-    # CİNSİYET
-    # --------------------------------------------------------
-
-    cinsiyet = (
-        cinsiyet_kontrol(
-            text
-        )
-    )
-
-    neden.extend(
-        cinsiyet["neden"]
-    )
-
-    if not cinsiyet["ok"]:
-
-        return {
-            "durum":
-                "BASVURAMAZSIN",
-
-            "kpss":
-                kpss["var"],
-
-            "taban":
-                kpss["taban"],
-
-            "neden":
-                neden,
-        }
-
-    # --------------------------------------------------------
-    # YAŞ
-    # --------------------------------------------------------
-
-    yas = (
-        yas_kontrol(
-            text
-        )
-    )
-
-    neden.extend(
-        yas["neden"]
-    )
-
-    if not yas["ok"]:
-
-        return {
-            "durum":
-                "BASVURAMAZSIN",
-
-            "kpss":
-                kpss["var"],
-
-            "taban":
-                kpss["taban"],
-
-            "neden":
-                neden,
-        }
-
-    # --------------------------------------------------------
-    # ASKERLİK
-    # --------------------------------------------------------
-
-    askerlik = (
-        askerlik_kontrol(
-            text
-        )
-    )
-
-    neden.extend(
-        askerlik["neden"]
-    )
-
-    if not askerlik["ok"]:
-
-        return {
-            "durum":
-                "BASVURAMAZSIN",
-
-            "kpss":
-                kpss["var"],
-
-            "taban":
-                kpss["taban"],
-
-            "neden":
-                neden,
-        }
-
-    # --------------------------------------------------------
-    # SONUÇ
-    # --------------------------------------------------------
-
-    manuel = any([
-        kpss["manuel"],
-        ogrenim["manuel"],
-        bolum["manuel"],
-        yas["manuel"],
-        askerlik["manuel"],
-    ])
-
-    if manuel:
-
-        durum = (
-            "MANUEL_INCELEME"
-        )
-
+    if red:
+        durum = "🔴 BAŞVURAMAZSIN"
+    elif manuel:
+        durum = "🟡 KONTROL GEREKİYOR"
     else:
-
-        durum = "UYGUN"
+        durum = "🟢 BAŞVURABİLİRSİN"
 
     return {
-
-        "durum":
-            durum,
-
-        "kpss":
-            kpss["var"],
-
-        "taban":
-            kpss["taban"],
-
-        "neden":
-            neden,
+        "durum": durum,
+        "neden": neden,
+        "red": red,
+        "kpss": k_ok,
+        "taban": k_taban,
+        "puan_turu": k_tur,
+        "son_tarih": son_tarih,
     }
 
 
@@ -1443,190 +550,59 @@ def ilan_analiz_et(ilan):
 # TELEGRAM
 # ============================================================
 
-def telegram_gonder(
-    mesaj
-):
+def telegram_gonder(mesaj):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        raise RuntimeError("Telegram secret bilgileri eksik.")
 
-    if not TELEGRAM_TOKEN:
-
-        raise RuntimeError(
-            "TELEGRAM_TOKEN bulunamadı."
-        )
-
-    if not TELEGRAM_CHAT_ID:
-
-        raise RuntimeError(
-            "TELEGRAM_CHAT_ID bulunamadı."
-        )
-
-    url = (
-        "https://api.telegram.org/bot"
-        + TELEGRAM_TOKEN
-        + "/sendMessage"
-    )
-
-    response = requests.post(
-
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    r = requests.post(
         url,
-
         data={
-
-            "chat_id":
-                TELEGRAM_CHAT_ID,
-
-            "text":
-                mesaj,
-
-            "disable_web_page_preview":
-                False,
-
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": mesaj,
+            "disable_web_page_preview": False,
         },
-
         timeout=TIMEOUT,
     )
-
-    print(
-        "[TELEGRAM]",
-        response.status_code,
-    )
-
-    if not response.ok:
-
-        print(
-            "[TELEGRAM HATA]",
-            response.text,
-        )
-
-    response.raise_for_status()
+    print("[TELEGRAM]", r.status_code)
+    if not r.ok:
+        print("[TELEGRAM HATA]", r.text)
+    r.raise_for_status()
 
 
-# ============================================================
-# TELEGRAM MESAJI
-# ============================================================
+def telegram_mesaji(ilan, analiz):
+    title = ilan.get("title", "")
+    link = ilan.get("link", "")
+    aciklama = temiz_html(ilan.get("description", ""))
 
-def telegram_mesaji(
-    ilan,
-    analiz,
-):
+    if len(aciklama) > 1200:
+        aciklama = aciklama[:1200] + "..."
 
-    durum = (
-        analiz["durum"]
-    )
+    tarih = analiz["son_tarih"]
+    tarih_text = tarih.strftime("%d.%m.%Y") if tarih else "Otomatik tespit edilemedi"
 
-    if durum == "UYGUN":
-
-        baslik = (
-            "🟢 BAŞVURABİLİRSİN"
-        )
-
-    elif (
-        durum
-        == "MANUEL_INCELEME"
-    ):
-
-        baslik = (
-            "🟡 MANUEL KONTROL GEREKLİ"
-        )
-
-    else:
-
-        baslik = (
-            "🔴 BAŞVURAMAZSIN"
-        )
-
-    if analiz["kpss"]:
-
+    kpss = "Yok / şart tespit edilmedi"
+    if "KPSS" in " ".join(analiz["neden"]):
         if analiz["taban"] is not None:
-
-            kpss_text = (
-                "Var | Taban: "
-                + str(
-                    analiz["taban"]
-                )
-            )
-
+            kpss = f"{analiz['puan_turu'] or 'KPSS'} ≥ {analiz['taban']} | Aday: {KPSS_PUANI}"
         else:
+            kpss = "Var fakat taban otomatik tespit edilemedi"
 
-            kpss_text = (
-                "Var | Taban otomatik tespit edilemedi"
-            )
-
-    else:
-
-        kpss_text = (
-            "Şart tespit edilmedi"
-        )
-
-    neden = "\n".join(
-
-        "• " + str(x)
-
-        for x in
-        analiz["neden"]
-
-    )
-
-    aciklama = (
-        ilan.get(
-            "description",
-            "",
-        )
-    )
-
-    if len(aciklama) > 1800:
-
-        aciklama = (
-            aciklama[:1800]
-            + "..."
-        )
+    neden = "\n".join("• " + x for x in analiz["neden"])
 
     return (
-
-        "🔔 KAMU İLAN TAKİP\n\n"
-
-        + baslik
-        + "\n\n"
-
-        + "📌 "
-        + ilan.get(
-            "title",
-            "",
-        )
-        + "\n\n"
-
-        + "🎓 Öğrenim: Önlisans\n"
-
-        + "⚖️ Bölüm: Adalet\n"
-
-        + "👤 Cinsiyet: "
-        + CINSIYET
-        + "\n"
-
-        + "🧑 Yaş: "
-        + str(YAS)
-        + "\n"
-
-        + "📊 KPSS: "
-        + kpss_text
-        + "\n\n"
-
-        + "🔎 ANALİZ\n"
-        + (
-            neden
-            or
-            "Şartlar uygun görünüyor."
-        )
-        + "\n\n"
-
-        + "📝 AÇIKLAMA\n"
-        + aciklama
-        + "\n\n"
-
-        + "🔗 "
-        + ilan.get(
-            "link",
-            "",
-        )
+        "⚖️ KAMU İLAN TAKİP\n\n"
+        f"📌 {title}\n\n"
+        f"{analiz['durum']}\n\n"
+        f"🎓 Öğrenim: Önlisans\n"
+        f"⚖️ Bölüm: Adalet\n"
+        f"👤 Cinsiyet: Erkek\n"
+        f"🧑 Yaş: {YAS}\n"
+        f"📊 KPSS: {kpss}\n"
+        f"📅 Son başvuru: {tarih_text}\n\n"
+        f"🔎 ANALİZ\n{neden}\n\n"
+        f"📝 Açıklama\n{aciklama}\n\n"
+        f"🔗 {link}"
     )
 
 
@@ -1635,347 +611,96 @@ def telegram_mesaji(
 # ============================================================
 
 def main():
-
-    print("")
     print("=" * 55)
-    print(
-        "KAMU İLAN TAKİP BAŞLIYOR"
-    )
-    print(
-        "KPSS:",
-        KPSS_PUANI,
-    )
-    print(
-        "Öğrenim:",
-        OGRENIM,
-    )
-    print(
-        "Bölüm:",
-        BOLUM,
-    )
-    print(
-        "Cinsiyet:",
-        CINSIYET,
-    )
-    print(
-        "Yaş:",
-        YAS,
-    )
+    print("KAMU İLAN TAKİP - NİHAİ SÜRÜM")
+    print(f"KPSS: {KPSS_PUANI} ({KPSS_TURU})")
+    print(f"Öğrenim: {OGRENIM}")
+    print(f"Bölüm: {BOLUM}")
+    print(f"Cinsiyet: {CINSIYET}")
+    print(f"Yaş: {YAS}")
     print("=" * 55)
 
-    # --------------------------------------------------------
-    # TELEGRAM ENV
-    # --------------------------------------------------------
+    print("\n=== ORTAM ===")
+    print("TELEGRAM_TOKEN:", "VAR" if TELEGRAM_TOKEN else "YOK")
+    print("TELEGRAM_CHAT_ID:", "VAR" if TELEGRAM_CHAT_ID else "YOK")
 
-    print("")
-    print(
-        "=== ORTAM KONTROLÜ ==="
-    )
-
-    print(
-        "TELEGRAM_TOKEN:",
-        (
-            "VAR"
-            if TELEGRAM_TOKEN
-            else "YOK"
-        ),
-    )
-
-    print(
-        "TELEGRAM_CHAT_ID:",
-        (
-            "VAR"
-            if TELEGRAM_CHAT_ID
-            else "YOK"
-        ),
-    )
-
-    if not TELEGRAM_TOKEN:
-
-        print(
-            "[HATA] TELEGRAM_TOKEN yok."
-        )
-
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[HATA] Telegram secret eksik.")
         return
-
-    if not TELEGRAM_CHAT_ID:
-
-        print(
-            "[HATA] TELEGRAM_CHAT_ID yok."
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # RSS
-    # --------------------------------------------------------
 
     try:
-
-        rss_url = (
-            rss_adresini_bul()
-        )
-
-        response = get_url(
-            rss_url
-        )
-
-    except Exception as hata:
-
-        print("")
-        print(
-            "!!! RSS HATASI !!!"
-        )
-
-        print(
-            repr(hata)
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # RSS PARSE
-    # --------------------------------------------------------
-
-    try:
-
-        ilanlar = rss_oku(
-            response.content
-        )
-
-    except Exception as hata:
-
-        print("")
-        print(
-            "!!! RSS PARSE HATASI !!!"
-        )
-
-        print(
-            repr(hata)
-        )
-
+        rss_url = rss_adresini_bul()
+        response = get_url(rss_url)
+        ilanlar = rss_oku(response.content)
+    except Exception as e:
+        print("[HATA] RSS:", repr(e))
         return
 
     if not ilanlar:
-
-        print(
-            "[HATA] Hiç ilan okunamadı."
-        )
-
+        print("[HATA] Hiç ilan bulunamadı.")
         return
 
-    # --------------------------------------------------------
-    # GÖNDERİLENLER
-    # --------------------------------------------------------
+    sent = gonderilenleri_oku()
 
-    gonderilenler = (
-        gonderilenleri_oku()
-    )
+    toplam = len(ilanlar)
+    uygun = 0
+    manuel = 0
+    red = 0
+    gonderildi = 0
 
-    yeni_gonderilenler = set(
-        gonderilenler
-    )
-
-    # --------------------------------------------------------
-    # SAYACLAR
-    # --------------------------------------------------------
-
-    uygun_sayisi = 0
-
-    manuel_sayisi = 0
-
-    uygunsuz_sayisi = 0
-
-    telegram_sayisi = 0
-
-    # --------------------------------------------------------
-    # ANALİZ
-    # --------------------------------------------------------
-
-    print("")
-    print("=" * 55)
-    print(
-        "İLAN ANALİZLERİ"
-    )
+    print("\n" + "=" * 55)
+    print("İLAN ANALİZLERİ")
     print("=" * 55)
 
-    for index, ilan in enumerate(
-        ilanlar,
-        start=1,
-    ):
+    for i, ilan in enumerate(ilanlar, 1):
+        print(f"\n[{i}/{toplam}] {ilan.get('title', '')}")
 
-        try:
+        # RSS metni yetersizse ilan detayını da çek.
+        detail = detay_metni_al(ilan)
+        ilan["detail_text"] = detail
 
-            analiz = (
-                ilan_analiz_et(
-                    ilan
-                )
-            )
+        sonuc = analiz_et(ilan)
+        print("DURUM:", sonuc["durum"])
 
-        except Exception as hata:
-
-            print(
-                "[ANALİZ HATASI]",
-                ilan.get(
-                    "title",
-                    "",
-                ),
-            )
-
-            print(
-                repr(hata)
-            )
-
-            continue
-
-        durum = (
-            analiz["durum"]
-        )
-
-        if durum == "UYGUN":
-
-            uygun_sayisi += 1
-
-        elif (
-            durum
-            == "MANUEL_INCELEME"
-        ):
-
-            manuel_sayisi += 1
-
+        if sonuc["durum"].startswith("🟢"):
+            uygun += 1
+        elif sonuc["durum"].startswith("🔴"):
+            red += 1
         else:
+            manuel += 1
 
-            uygunsuz_sayisi += 1
+        iid = ilan_id(ilan)
 
-        print("")
-        print(
-            f"[{index}/{len(ilanlar)}]",
-            durum,
-        )
+        if iid in sent:
+            print("Telegram: DAHA ÖNCE GÖNDERİLDİ")
+  continue
 
-        print(
-            ilan.get(
-                "title",
-                "",
-            )
-        )
+        # Yalnızca yeni ve kullanıcı açısından anlamlı ilanları gönder.
+        # Kırmızı ilanları Telegram'a spam olarak yollamıyoruz.
+        if sonuc["durum"].startswith(("🟢", "🟡")):
+            try:
+                telegram_gonder(telegram_mesaji(ilan, sonuc))
+                sent.add(iid)
+                gonderildi += 1
+                print("Telegram: GÖNDERİLDİ")
+            except Exception as e:
+                print("[TELEGRAM HATA]", repr(e))
+        else:
+            print("Telegram: BAŞVURAMAZSIN - gönderilmedi")
 
-        # ----------------------------------------------------
-        # SADECE UYGUN + MANUEL
-        # ----------------------------------------------------
+    gonderilenleri_kaydet(sent)
 
-        if durum not in (
-            "UYGUN",
-            "MANUEL_INCELEME",
-        ):
-
-            continue
-
-        iid = ilan_id(
-            ilan
-        )
-
-        if iid in gonderilenler:
-
-            print(
-                "Telegram: DAHA ÖNCE GÖNDERİLDİ"
-            )
-
-            continue
-
-        try:
-
-            mesaj = (
-                telegram_mesaji(
-                    ilan,
-                    analiz,
-                )
-            )
-
-            telegram_gonder(
-                mesaj
-            )
-
-            yeni_gonderilenler.add(
-                iid
-            )
-
-            telegram_sayisi += 1
-
-            print(
-                "Telegram: GÖNDERİLDİ"
-            )
-
-        except Exception as hata:
-
-            print(
-                "Telegram: HATA"
-            )
-
-            print(
-                repr(hata)
-            )
-
-    # --------------------------------------------------------
-    # KAYDET
-    # --------------------------------------------------------
-
-    try:
-
-        gonderilenleri_kaydet(
-            yeni_gonderilenler
-        )
-
-    except Exception as hata:
-
-        print(
-            "[UYARI] sent_ids kaydedilemedi:",
-            repr(hata),
-        )
-
-    # --------------------------------------------------------
-    # SONUÇ
-    # --------------------------------------------------------
-
-    print("")
+    print("\n" + "=" * 55)
+    print("TARAMA TAMAMLANDI")
     print("=" * 55)
-    print(
-        "TARAMA TAMAMLANDI"
-    )
+    print("Toplam ilan:", toplam)
+    print("🟢 Başvurabilir:", uygun)
+    print("🟡 Kontrol gerekiyor:", manuel)
+    print("🔴 Başvuramaz:", red)
+    print("📨 Telegram'a gönderilen:", gonderildi)
     print("=" * 55)
 
-    print(
-        "Toplam ilan:",
-        len(ilanlar),
-    )
-
-    print(
-        "🟢 Başvurabilir:",
-        uygun_sayisi,
-    )
-
-    print(
-        "🟡 Manuel inceleme:",
-        manuel_sayisi,
-    )
-
-    print(
-        "🔴 Başvuramaz:",
-        uygunsuz_sayisi,
-    )
-
-    print(
-        "📨 Telegram'a gönderilen:",
-        telegram_sayisi,
-    )
-
-    print("=" * 55)
-
-
-# ============================================================
-# BAŞLAT
-# ============================================================
 
 if __name__ == "__main__":
-
     main()
+    
