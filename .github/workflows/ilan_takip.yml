@@ -1,64 +1,37 @@
-name: Kamu İlan Takip
+name: takip
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
-
-permissions:
-  contents: write
+    - cron: '0 6 * * *' # Her gün TSİ 09:00'da çalışır (UTC 06:00)
+  workflow_dispatch:   # Manuel çalıştırma butonu
 
 jobs:
-  takip:
+  run-script:
     runs-on: ubuntu-latest
-
     steps:
-
-      - name: Kodu indir
+      - name: Repoyu Çek
         uses: actions/checkout@v4
 
-      - name: Python kur
+      - name: Python Kur
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
-      - name: Gereksinimleri kur
+      - name: Kütüphaneleri Yükle
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: İlanları tara
+      - name: Scripti Çalıştır
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
+
+      - name: Gönderilen İlanları Kaydet (sent_ids.json)
         run: |
-          echo "=== ÇALIŞMA DİZİNİ ==="
-          pwd
-
-          echo "=== DOSYALAR ==="
-          ls -la
-
-          echo "=== MAIN.PY KONTROL ==="
-          test -f main.py
-          wc -l main.py
-
-          echo "=== MAIN.PY İLK 15 SATIR ==="
-          head -n 15 main.py
-
-          echo "=== PYTHON ==="
-          python --version
-
-          echo "=== MAIN.PY BAŞLATILIYOR ==="
-          python -u main.py
-
-      - name: Gönderilen ilanları kaydet
-        run: |
-          git config user.name "Kamu İlan Takip Botu"
-          git config user.email "actions@github.com"
-
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
           git add sent_ids.json
-
-          git diff --cached --quiet || \
-          git commit -m "İlan takip verisini güncelle"
-
-          git push
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Chore: Update sent_ids.json" && git push)
+          
