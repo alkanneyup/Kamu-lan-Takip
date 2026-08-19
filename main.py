@@ -35,6 +35,48 @@ def tr_lower(metin):
         metin = metin.replace(eski, yeni)
     return metin.lower()
 
+def generate_id(metin):
+    """İlan bağlantısına göre benzersiz hash üretir."""
+    return hashlib.md5(metin.encode('utf-8')).hexdigest()
+
+def load_sent_ids():
+    """Daha önce gönderilmiş ilan ID'lerini okur."""
+    if os.path.exists("sent_ids.json"):
+        try:
+            with open("sent_ids.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_sent_ids(sent_ids):
+    """Yeni gönderilen ilan ID'lerini dosyaya kaydeder."""
+    try:
+        with open("sent_ids.json", "w", encoding="utf-8") as f:
+            json.dump(sent_ids, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[HATA] sent_ids.json kaydedilemedi: {e}")
+
+def send_telegram_message(text):
+    """Telegram botu üzerinden mesaj gönderir."""
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    
+    if not bot_token or not chat_id:
+        print("[UYARI] TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID bulunamadı!")
+        return
+    
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    
+    if len(text) > 4000:
+        chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
+        for chunk in chunks:
+            payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown", "disable_web_page_preview": True}
+            requests.post(url, json=payload)
+    else:
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True}
+        requests.post(url, json=payload)
+
 def ilan_detay_getir(url):
     """Kariyer Kapısı detay sayfasından düz metin çeker."""
     try:
@@ -64,11 +106,10 @@ def ilan_detay_getir(url):
     return ""
 
 def ilan_analiz_et(baslik, detay_metni):
-    """Türkçe uyumlu gelişmiş başlık ve detay analizi."""
+    """Gelişmiş başlık ve detay analizi."""
     baslik_tr = tr_lower(baslik)
     metin_tr = tr_lower(baslik + " " + detay_metni)
     
-    # Adalet Önlisans ile kesinlikle uyuşmayan unvan ve alanlar
     uyumsuz_anahtarlar = [
         "bilişim", "mühendis", "yüksek lisans", "konsolosluk", "doktor", 
         "hemşire", "yurtdışı", "yurt dışı", "staj", "yazılım", "mimar", "uzman", 
@@ -80,16 +121,13 @@ def ilan_analiz_et(baslik, detay_metni):
     if any(k in baslik_tr for k in uyumsuz_anahtarlar):
         return "🔴 BAŞVURAMAZSIN", "Pozisyon unvanı Önlisans/Adalet profiline uygun değil."
 
-    # Başlık düzeyinde doğrudan uyumlu alanlar
     uyumlu_basliklar = ["büro personeli", "infaz koruma", "zabıt katibi", "mübaşir", "adalet", "koruma ve güvenlik"]
     
-    # Metin çekilemediğinde
     if len(detay_metni) < 150:
         if any(k in baslik_tr for k in uyumlu_basliklar):
             return "🟢 BAŞVURABİLİRSİN", "İlan başlığı profilinizle doğrudan uyumlu."
         return "🟡 KONTROL GEREKİYOR", "İlan detay metni çekilemedi, başlık genel."
 
-    # Detay metni kontrolleri
     if "lisans mezunu" in metin_tr and "önlisans" not in metin_tr:
         return "🔴 BAŞVURAMAZSIN", "İlan yalnızca lisans mezuniyeti şartı arıyor."
 
@@ -100,8 +138,11 @@ def ilan_analiz_et(baslik, detay_metni):
 
 def main():
     print("============================================================")
-    print("KAMU İLAN TAKİP - TÜRKÇE FİLTRE DÜZELTİLMİŞ SÜRÜM")
+    print("KAMU İLAN TAKİP - OTOMATİK BİLDİRİMLİ SÜRÜM")
     print("============================================================")
+    
+    sent_ids = load_sent_ids()
+    new_sent_ids = list(sent_ids)
     
     rss_url = "https://kariyerkapisi.gov.tr/RSS"
     ilanlar = []
@@ -123,31 +164,45 @@ def main():
         iskur_ilanlari = iskur_ilanlarini_getir()
         if iskur_ilanlari:
             ilanlar.extend(iskur_ilanlari)
-            print(f"[İŞKUR] {len(iskur_ilanlari)} adet ilan eklendi.")
     except Exception as e:
         print(f"[HATA] İŞKUR verileri alınamadı: {e}")
 
     print(f"\n=== Toplam Taranacak İlan: {len(ilanlar)} ===")
     
-    basvuru_sayilari = {"🟢 BAŞVURABİLİRSİN": 0, "🟡 KONTROL GEREKİYOR": 0, "🔴 BAŞVURAMAZSIN": 0}
+    yeni_green = []
+    yeni_yellow = []
 
     for idx, ilan in enumerate(ilanlar, 1):
         baslik = ilan.get('title', '')
         link = ilan.get('link', '')
+        ilan_id = generate_id(link or baslik)
         
         detay = ilan_detay_getir(link) if link else ""
         durum, aciklama = ilan_analiz_et(baslik, detay)
         
-        basvuru_sayilari[durum] += 1
         print(f"\n[{idx}/{len(ilanlar)}] {baslik}")
         print(f"DURUM: {durum} ({aciklama})")
+        
+        if ilan_id not in sent_ids:
+            if "🟢" in durum:
+                yeni_green.append(f"🟢 [{baslik}]({link})")
+                new_sent_ids.append(ilan_id)
+            elif "🟡" in durum:
+                yeni_yellow.append(f"🟡 [{baslik}]({link})")
+                new_sent_ids.append(ilan_id)
 
-    print("\n============================================================")
-    print("TARAMA TAMAMLANDI")
-    print("============================================================")
-    print(f"🟢 Başvurabilir: {basvuru_sayilari['🟢 BAŞVURABİLİRSİN']}")
-    print(f"🟡 Kontrol gerekiyor: {basvuru_sayilari['🟡 KONTROL GEREKİYOR']}")
-    print(f"🔴 Başvuramaz: {basvuru_sayilari['🔴 BAŞVURAMAZSIN']}")
+    if yeni_green or yeni_yellow:
+        msg = "📢 **YENİ KAMU İLANLARI TESPİT EDİLDİ**\n\n"
+        if yeni_green:
+            msg += "🟢 **BAŞVURABİLECEĞİNİZ İLANLAR:**\n" + "\n".join(yeni_green) + "\n\n"
+        if yeni_yellow:
+            msg += "🟡 **KONTROL ETMENİZ GEREKEN İLANLAR:**\n" + "\n".join(yeni_yellow) + "\n\n"
+        
+        send_telegram_message(msg)
+        save_sent_ids(new_sent_ids)
+        print("\n[TELEGRAM] Yeni ilanlar bildirildi ve sent_ids.json güncellendi.")
+    else:
+        print("\n[TELEGRAM] Yeni bildirilecek ilan bulunamadı.")
 
 if __name__ == "__main__":
     main()
