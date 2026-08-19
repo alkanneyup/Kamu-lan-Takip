@@ -26,27 +26,33 @@ HEADERS = {
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
+def tr_lower(metin):
+    """Türkçe karakterleri doğru şekilde küçük harfe dönüştürür."""
+    if not metin:
+        return ""
+    donusum = {"İ": "i", "I": "ı", "Ş": "ş", "Ğ": "ğ", "Ü": "ü", "Ö": "ö", "Ç": "ç"}
+    for eski, yeni in donusum.items():
+        metin = metin.replace(eski, yeni)
+    return metin.lower()
+
 def ilan_detay_getir(url):
-    """Kariyer Kapısı detay API'sine doğrudan istek atarak metni çeker."""
+    """Kariyer Kapısı detay sayfasından düz metin çeker."""
     try:
-        # Link içerisindeki GUID id değerini ayıkla
         match = re.search(r'i=([a-f0-9\-]+)', url)
         if match:
             guid = match.group(1)
-            # Kariyer Kapısı arka plan API adresi
             api_url = f"https://kariyerkapisi.gov.tr/RSS/IlanDetayGetir?id={guid}"
             res = requests.get(api_url, headers=HEADERS, timeout=10)
             if res.status_code == 200:
                 try:
                     data = res.json()
                     metin = data.get('Metin', '') or data.get('Açıklama', '') or str(data)
-                    if metin:
+                    if metin and len(metin) > 50:
                         clean_text = re.sub(r'<[^>]+>', ' ', metin)
                         return " ".join(html.unescape(clean_text).split())
                 except Exception:
                     pass
         
-        # API yanıt vermezse standart HTML fallback
         res = requests.get(url, headers=HEADERS, timeout=10)
         if res.status_code == 200:
             clean_text = re.sub(r'<script.*?>.*?</script>', '', res.text, flags=re.DOTALL | re.IGNORECASE)
@@ -58,45 +64,45 @@ def ilan_detay_getir(url):
     return ""
 
 def ilan_analiz_et(baslik, detay_metni):
-    """Gelişmiş başlık ve detay analizi."""
-    baslik_lower = baslik.lower()
-    metin_lower = (baslik + " " + detay_metni).lower()
+    """Türkçe uyumlu gelişmiş başlık ve detay analizi."""
+    baslik_tr = tr_lower(baslik)
+    metin_tr = tr_lower(baslik + " " + detay_metni)
     
-    # 1. Başlık Düzeyinde Kesin Uyumsuz Pozisyonlar (Adalet Önlisans Dışı)
+    # Adalet Önlisans ile kesinlikle uyuşmayan unvan ve alanlar
     uyumsuz_anahtarlar = [
         "bilişim", "mühendis", "yüksek lisans", "konsolosluk", "doktor", 
-        "hemşire", "yurtdışı", "staj", "yazılım", "mimar", "uzman", 
+        "hemşire", "yurtdışı", "yurt dışı", "staj", "yazılım", "mimar", "uzman", 
         "öğretim üyesi", "akademik", "biyolog", "eczacı", "psikolog", 
-        "tekniker", "teknisyen", "pilot", "kaptan", "görevde yükselme"
+        "tekniker", "teknisyen", "pilot", "kaptan", "görevde yükselme", 
+        "sekreter", "istatistik", "sistem personeli", "bilgisayar"
     ]
     
-    if any(k in baslik_lower for k in uyumsuz_anahtarlar):
+    if any(k in baslik_tr for k in uyumsuz_anahtarlar):
         return "🔴 BAŞVURAMAZSIN", "Pozisyon unvanı Önlisans/Adalet profiline uygun değil."
 
-    # 2. Başlık Düzeyinde Doğrudan Uyumlu Pozisyonlar
+    # Başlık düzeyinde doğrudan uyumlu alanlar
     uyumlu_basliklar = ["büro personeli", "infaz koruma", "zabıt katibi", "mübaşir", "adalet", "koruma ve güvenlik"]
     
-    # 3. Metin Yetersizliği Kontrolü
+    # Metin çekilemediğinde
     if len(detay_metni) < 150:
-        if any(k in baslik_lower for k in uyumlu_basliklar):
+        if any(k in baslik_tr for k in uyumlu_basliklar):
             return "🟢 BAŞVURABİLİRSİN", "İlan başlığı profilinizle doğrudan uyumlu."
         return "🟡 KONTROL GEREKİYOR", "İlan detay metni çekilemedi, başlık genel."
 
-    # 4. Detay Metni İncelemesi
-    if "lisans mezunu" in metin_lower and "önlisans" not in metin_lower:
+    # Detay metni kontrolleri
+    if "lisans mezunu" in metin_tr and "önlisans" not in metin_tr:
         return "🔴 BAŞVURAMAZSIN", "İlan yalnızca lisans mezuniyeti şartı arıyor."
 
-    if any(k in metin_lower for k in ["adalet", "önlisans", "büro personeli"]):
+    if any(k in metin_tr for k in ["adalet", "önlisans", "büro personeli"]):
         return "🟢 BAŞVURABİLİRSİN", "Profilinizle uyumlu şartlar tespit edildi."
 
     return "🟡 KONTROL GEREKİYOR", "Özel şartların manuel incelenmesi önerilir."
 
 def main():
     print("============================================================")
-    print("KAMU İLAN TAKİP - GÜNCELLENMİŞ SÜRÜM")
+    print("KAMU İLAN TAKİP - TÜRKÇE FİLTRE DÜZELTİLMİŞ SÜRÜM")
     print("============================================================")
     
-    # 1. Kariyer Kapısı RSS
     rss_url = "https://kariyerkapisi.gov.tr/RSS"
     ilanlar = []
     
@@ -113,7 +119,6 @@ def main():
     except Exception as e:
         print(f"[HATA] RSS Okunamadı: {e}")
 
-    # 2. İŞKUR İlanları Entegrasyonu
     try:
         iskur_ilanlari = iskur_ilanlarini_getir()
         if iskur_ilanlari:
