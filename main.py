@@ -4,6 +4,7 @@ import json
 import html
 import hashlib
 import requests
+from iskur import iskur_ilanlarini_getir
 import xml.etree.ElementTree as ET
 from datetime import date
 from urllib.parse import urljoin
