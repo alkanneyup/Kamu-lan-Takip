@@ -27,50 +27,69 @@ HEADERS = {
 }
 
 def ilan_detay_getir(url):
-    """İlan detay sayfasından düz metni çeker."""
+    """Kariyer Kapısı detay API'sine doğrudan istek atarak metni çeker."""
     try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        if res.status_code != 200:
-            return ""
+        # Link içerisindeki GUID id değerini ayıkla
+        match = re.search(r'i=([a-f0-9\-]+)', url)
+        if match:
+            guid = match.group(1)
+            # Kariyer Kapısı arka plan API adresi
+            api_url = f"https://kariyerkapisi.gov.tr/RSS/IlanDetayGetir?id={guid}"
+            res = requests.get(api_url, headers=HEADERS, timeout=10)
+            if res.status_code == 200:
+                try:
+                    data = res.json()
+                    metin = data.get('Metin', '') or data.get('Açıklama', '') or str(data)
+                    if metin:
+                        clean_text = re.sub(r'<[^>]+>', ' ', metin)
+                        return " ".join(html.unescape(clean_text).split())
+                except Exception:
+                    pass
         
-        # Script ve stil etiketlerini temizle
-        clean_text = re.sub(r'<script.*?>.*?</script>', '', res.text, flags=re.DOTALL | re.IGNORECASE)
-        clean_text = re.sub(r'<style.*?>.*?</style>', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
-        clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
-        clean_text = html.unescape(clean_text)
-        return " ".join(clean_text.split())
-    except Exception as e:
-        print(f"[HATA] Detay çekilemedi ({url}): {e}")
-        return ""
+        # API yanıt vermezse standart HTML fallback
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        if res.status_code == 200:
+            clean_text = re.sub(r'<script.*?>.*?</script>', '', res.text, flags=re.DOTALL | re.IGNORECASE)
+            clean_text = re.sub(r'<style.*?>.*?</style>', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
+            clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+            return " ".join(html.unescape(clean_text).split())
+    except Exception:
+        pass
+    return ""
 
 def ilan_analiz_et(baslik, detay_metni):
-    """Profil ile ilan şartlarını karşılaştırır."""
+    """Gelişmiş başlık ve detay analizi."""
     baslik_lower = baslik.lower()
     metin_lower = (baslik + " " + detay_metni).lower()
     
-    # Adalet Önlisans ile kesinlikle uyuşmayan alanlar
-    uyumsuz_basliklar = [
-        "bilişim", "mühendis", "yüksek lisans", "konsolosluk", 
-        "doktor", "hemşire", "yurtdışı staj", "yazılım", "mimar"
+    # 1. Başlık Düzeyinde Kesin Uyumsuz Pozisyonlar (Adalet Önlisans Dışı)
+    uyumsuz_anahtarlar = [
+        "bilişim", "mühendis", "yüksek lisans", "konsolosluk", "doktor", 
+        "hemşire", "yurtdışı", "staj", "yazılım", "mimar", "uzman", 
+        "öğretim üyesi", "akademik", "biyolog", "eczacı", "psikolog", 
+        "tekniker", "teknisyen", "pilot", "kaptan", "görevde yükselme"
     ]
     
-    if any(k in baslik_lower for k in uyumsuz_basliklar):
-        return "🔴 BAŞVURAMAZSIN", "Pozisyon önlisans/adalet profili ile uyumsuz."
+    if any(k in baslik_lower for k in uyumsuz_anahtarlar):
+        return "🔴 BAŞVURAMAZSIN", "Pozisyon unvanı Önlisans/Adalet profiline uygun değil."
 
-    # Detay metni yetersiz kaldığında güvenli duruma geç
-    if len(detay_metni) < 200:
-        return "🟡 KONTROL GEREKİYOR", "İlan metni tam çekilemedi, manuel inceleyin."
+    # 2. Başlık Düzeyinde Doğrudan Uyumlu Pozisyonlar
+    uyumlu_basliklar = ["büro personeli", "infaz koruma", "zabıt katibi", "mübaşir", "adalet", "koruma ve güvenlik"]
+    
+    # 3. Metin Yetersizliği Kontrolü
+    if len(detay_metni) < 150:
+        if any(k in baslik_lower for k in uyumlu_basliklar):
+            return "🟢 BAŞVURABİLİRSİN", "İlan başlığı profilinizle doğrudan uyumlu."
+        return "🟡 KONTROL GEREKİYOR", "İlan detay metni çekilemedi, başlık genel."
 
-    # Öğrenim seviyesi kontrolü
+    # 4. Detay Metni İncelemesi
     if "lisans mezunu" in metin_lower and "önlisans" not in metin_lower:
-        return "🔴 BAŞVURAMAZSIN", "Yalnızca lisans mezuniyeti isteniyor."
+        return "🔴 BAŞVURAMAZSIN", "İlan yalnızca lisans mezuniyeti şartı arıyor."
 
-    # Uygun alan eşleşmesi
-    uygun_kelimeler = ["adalet", "önlisans", "büro personeli", "infaz koruma", "zabıt katibi", "mübaşir"]
-    if any(k in metin_lower for k in uygun_kelimeler):
-        return "🟢 BAŞVURABİLİRSİN", "Profilinizle uyumlu alanlar tespit edildi."
+    if any(k in metin_lower for k in ["adalet", "önlisans", "büro personeli"]):
+        return "🟢 BAŞVURABİLİRSİN", "Profilinizle uyumlu şartlar tespit edildi."
 
-    return "🟡 KONTROL GEREKİYOR", "Özel şartların manuel incelenmesi gerekiyor."
+    return "🟡 KONTROL GEREKİYOR", "Özel şartların manuel incelenmesi önerilir."
 
 def main():
     print("============================================================")
@@ -111,12 +130,11 @@ def main():
         baslik = ilan.get('title', '')
         link = ilan.get('link', '')
         
-        print(f"\n[{idx}/{len(ilanlar)}] {baslik}")
-        
         detay = ilan_detay_getir(link) if link else ""
         durum, aciklama = ilan_analiz_et(baslik, detay)
         
         basvuru_sayilari[durum] += 1
+        print(f"\n[{idx}/{len(ilanlar)}] {baslik}")
         print(f"DURUM: {durum} ({aciklama})")
 
     print("\n============================================================")
