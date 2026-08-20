@@ -58,7 +58,7 @@ def save_sent_ids(sent_ids):
         print(f"[HATA] sent_ids.json kaydedilemedi: {e}")
 
 def send_telegram_message(text):
-    """Telegram botu üzerinden mesaj gönderir."""
+    """Telegram botu üzerinden HTML formatında mesaj gönderir."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     
@@ -71,10 +71,10 @@ def send_telegram_message(text):
     if len(text) > 4000:
         chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
         for chunk in chunks:
-            payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown", "disable_web_page_preview": True}
+            payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML", "disable_web_page_preview": True}
             requests.post(url, json=payload)
     else:
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True}
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         requests.post(url, json=payload)
 
 def ilan_detay_getir(url):
@@ -184,23 +184,32 @@ def main():
         print(f"DURUM: {durum} ({aciklama})")
         
         if ilan_id not in sent_ids:
+            clean_title = html.escape(baslik)
+            clean_aciklama = html.escape(aciklama)
+            
+            # Telegram için biçimlendirilmiş ilan kartı
+            if link:
+                item_str = f"• <a href='{link}'><b>{clean_title}</b></a>\n  📌 <i>{clean_aciklama}</i>"
+            else:
+                item_str = f"• <b>{clean_title}</b>\n  📌 <i>{clean_aciklama}</i>"
+
             if "🟢" in durum:
-                yeni_green.append(f"🟢 [{baslik}]({link})")
+                yeni_green.append(item_str)
                 new_sent_ids.append(ilan_id)
             elif "🟡" in durum:
-                yeni_yellow.append(f"🟡 [{baslik}]({link})")
+                yeni_yellow.append(item_str)
                 new_sent_ids.append(ilan_id)
 
     if yeni_green or yeni_yellow:
-        msg = "📢 **YENİ KAMU İLANLARI TESPİT EDİLDİ**\n\n"
+        msg = "📢 <b>YENİ KAMU İLANLARI TESPİT EDİLDİ</b>\n\n"
         if yeni_green:
-            msg += "🟢 **BAŞVURABİLECEĞİNİZ İLANLAR:**\n" + "\n".join(yeni_green) + "\n\n"
+            msg += "🟢 <b>BAŞVURABİLECEĞİNİZ İLANLAR:</b>\n" + "\n\n".join(yeni_green) + "\n\n"
         if yeni_yellow:
-            msg += "🟡 **KONTROL ETMENİZ GEREKEN İLANLAR:**\n" + "\n".join(yeni_yellow) + "\n\n"
+            msg += "🟡 <b>KONTROL ETMENİZ GEREKEN İLANLAR:</b>\n" + "\n\n".join(yeni_yellow) + "\n\n"
         
         send_telegram_message(msg)
         save_sent_ids(new_sent_ids)
-        print("\n[TELEGRAM] Yeni ilanlar bildirildi ve sent_ids.json güncellendi.")
+        print("\n[TELEGRAM] Yeni ilanlar detaylı şekilde bildirildi ve sent_ids.json güncellendi.")
     else:
         print("\n[TELEGRAM] Yeni bildirilecek ilan bulunamadı.")
 
