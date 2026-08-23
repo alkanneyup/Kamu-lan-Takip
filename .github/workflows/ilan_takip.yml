@@ -1,37 +1,37 @@
-name: takip
+name: Kamu Ilan Takip Workflow
 
 on:
   schedule:
-    - cron: '0 6 * * *' # Her gün TSİ 09:00'da çalışır (UTC 06:00)
-  workflow_dispatch:   # Manuel çalıştırma butonu
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
-  run-script:
+  run-tracker:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Repoyu Çek
+      - name: Repositoriyi Klonla
         uses: actions/checkout@v4
 
-      - name: Python Kur
+      - name: Python Ortamını Kur
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
 
-      - name: Kütüphaneleri Yükle
+      - name: Bağımlılıkları Yükle
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests beautifulsoup4
 
-      - name: Scripti Çalıştır
+      - name: Takip Betiğini Çalıştır
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python main.py
 
-      - name: Gönderilen İlanları Kaydet (sent_ids.json)
+      - name: Veri Durumunu (sent_ids.json) Güncelle ve Commit Et
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add sent_ids.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Chore: Update sent_ids.json" && git push)
-          
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: otomatik durum güncellemesi [skip ci]" && git push)
