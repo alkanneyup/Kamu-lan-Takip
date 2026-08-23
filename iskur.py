@@ -1,118 +1,44 @@
-import re
-import html
+import logging
 import requests
-from bs4 import BeautifulSoup
-
-
-# ============================================================
-# İŞKUR
-# ============================================================
-
-ISKUR_URL = "https://acikisharita.iskur.gov.tr/"
+import xml.etree.ElementTree as ET
+from typing import List, Dict
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 Chrome/139 Safari/537.36"
-    )
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9"
 }
 
+def iskur_ilanlarini_getir() -> List[Dict[str, str]]:
+    """İŞKUR kamu ilanlarını RSS/API kaynaklarından güvenli bir biçimde çeker."""
+    ilanlar: List[Dict[str, str]] = []
+    
+    iskur_urls = [
+        "https://esube.iskur.gov.tr/Rss/Ilanlar.aspx?tur=kamu",
+        "https://www.iskur.gov.tr/rss/kamu-ilanlari"
+    ]
 
-def temizle(text):
-    if not text:
-        return ""
-
-    text = html.unescape(str(text))
-    text = BeautifulSoup(text, "html.parser").get_text(" ")
-    text = re.sub(r"\s+", " ", text)
-
-    return text.strip()
-
-
-def iskur_sayfasini_oku():
-    """
-    İŞKUR Açık İş Haritası ana sayfasını okur.
-
-    Şimdilik yalnızca bağlantının erişilebilirliğini
-    ve sayfadaki temel bilgileri kontrol eder.
-    """
-
-    print("")
-    print("=" * 50)
-    print("İŞKUR AÇIK İŞLER KONTROLÜ")
-    print("=" * 50)
-
-    try:
-        response = requests.get(
-            ISKUR_URL,
-            headers=HEADERS,
-            timeout=30,
-        )
-
-        print(
-            f"[İŞKUR] HTTP: {response.status_code}"
-        )
-
-        response.raise_for_status()
-
-    except Exception as exc:
-        print(
-            "[İŞKUR HATA]",
-            exc,
-        )
-        return []
-
-    soup = BeautifulSoup(
-        response.text,
-        "html.parser",
-    )
-
-    text = temizle(
-        soup.get_text(" ")
-    )
-
-    print(
-        "[İŞKUR] Sayfa okundu."
-    )
-
-    # Sayfada toplam açık iş bilgisini yakalamaya çalış.
-    match = re.search(
-        r"TOPLAM AÇIK İŞ\s*([\d\.\,]+)",
-        text,
-        re.IGNORECASE,
-    )
-
-    if match:
-        print(
-            "[İŞKUR] Toplam açık iş:",
-            match.group(1),
-        )
-    else:
-        print(
-            "[İŞKUR] Toplam açık iş sayısı "
-            "otomatik okunamadı."
-        )
-
-    return []
-
-
-def iskur_ilanlarini_getir():
-    """
-    İŞKUR ilanlarını ana programa verecek fonksiyon.
-
-    Veri kaynağının gerçek API/istek yapısı
-    doğrulandıktan sonra burada ilanlar üretilecek.
-    """
-
-    ilanlar = iskur_sayfasini_oku()
-
-    print(
-        "[İŞKUR] Alınan ilan:",
-        len(ilanlar),
-    )
+    for url in iskur_urls:
+        try:
+            response = requests.get(url, headers=HEADERS, timeout=10)
+            if response.status_code == 200 and len(response.content) > 100:
+                try:
+                    root = ET.fromstring(response.content)
+                    for item in root.findall('./channel/item'):
+                        title = item.find('title').text if item.find('title') is not None else ''
+                        link = item.find('link').text if item.find('link') is not None else ''
+                        
+                        if title:
+                            ilanlar.append({
+                                'title': title.strip(),
+                                'link': link.strip() if link else '',
+                                'source': 'İŞKUR Kamu'
+                            })
+                    if ilanlar:
+                        break
+                except ET.ParseError:
+                    logging.debug(f"İŞKUR RSS XML Ayrıştırma hatası ({url})")
+        except Exception as e:
+            logging.debug(f"İŞKUR RSS Bağlantı hatası ({url}): {e}")
 
     return ilanlar
-
-
-if __name__ == "__main__":
-    iskur_ilanlarini_getir()
