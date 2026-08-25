@@ -66,7 +66,7 @@ def save_sent_ids(sent_ids: Set[str]) -> None:
         logging.error(f"sent_ids.json kaydetme hatası: {e}")
 
 def send_telegram_message(text: str) -> None:
-    """Telegram üzerinden güvenli biçimde bildirim gönderir."""
+    """Telegram üzerinden HTML parse hatası almadan güvenli biçimde bildirim gönderir."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not bot_token or not chat_id:
@@ -75,7 +75,8 @@ def send_telegram_message(text: str) -> None:
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
-    max_len = 3800
+    # HTML parsing riski olmaması için ilan bazlı veya 3000 karakterlik güvenli bloklama
+    max_len = 3000
     chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)] if len(text) > max_len else [text]
 
     for chunk in chunks:
@@ -87,7 +88,18 @@ def send_telegram_message(text: str) -> None:
         }
         try:
             response = requests.post(url, json=payload, timeout=10)
-            if response.status_code != 200:
+            
+            # HTML parse hatası (400) verirse HTML etiketlerini temizleyip Düz Metin (Plain Text) olarak tekrar gönder
+            if response.status_code == 400 and "can't parse entities" in response.text:
+                logging.warning("Telegram HTML Parse hatası aldı, mesaj düz metin olarak tekrar gönderiliyor...")
+                clean_plain_text = re.sub(r'<[^>]+>', '', chunk)
+                payload_fallback = {
+                    "chat_id": chat_id,
+                    "text": clean_plain_text,
+                    "disable_web_page_preview": True
+                }
+                requests.post(url, json=payload_fallback, timeout=10)
+            elif response.status_code != 200:
                 logging.error(f"Telegram API Hatası: {response.status_code} - {response.text}")
         except Exception as e:
             logging.error(f"Telegram mesajı gönderilirken istisna oluştu: {e}")
@@ -116,7 +128,7 @@ def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
     return ilanlar
 
 def ilan_detay_getir(url: str) -> str:
-    """İlan detay sayfasından BeautifulSoup kullanarak daha temiz metin çeker."""
+    """İlan detay sayfasından BeautifulSoup kullanarak temiz metin çeker."""
     if not url:
         return ""
     try:
@@ -141,7 +153,6 @@ def ilan_detay_getir(url: str) -> str:
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
             
-            # Script, Style vb. görünmeyen elemanları kaldır
             for element in soup(["script", "style", "header", "footer", "nav"]):
                 element.extract()
                 
@@ -208,7 +219,6 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
     if "önlisans" in metin_tr or "ön lisans" in metin_tr:
         return "🟢 BAŞVURABİLİRSİN", "Önlisans mezuniyeti şartı sağlayan genel kontenjan."
 
-    # Görseldeki Hatayı Önleyen Kısım: Detay Metni Çekilemediyse Verilecek Mesaj
     if len(detay_metni) < 50:
         return "🟡 KONTROL GEREKİYOR", "İlan detay metni çekilemedi, başlığı genel kontrol ediniz."
 
@@ -281,7 +291,7 @@ def main() -> None:
         logging.info(f"[{idx}/{len(ilanlar)}] ({kaynak}) {baslik} -> {durum}")
 
         clean_title = html.escape(baslik)
-        clean_aciklama = html.escape(aciklama)
+        clean_aciklama = html.escape(aciklama).replace('<', '&lt;').replace('>', '&gt;')
         clean_kaynak = html.escape(kaynak)
 
         if link:
