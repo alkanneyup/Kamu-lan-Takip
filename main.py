@@ -74,7 +74,7 @@ def send_telegram_message(text: str) -> None:
         return
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    
+
     max_len = 3800
     chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)] if len(text) > max_len else [text]
 
@@ -100,12 +100,10 @@ def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
         res = requests.get(base_url, headers=HEADERS, timeout=12)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
-            # Sayfadaki tüm ilan bağlantılarını ve başlıklarını ayıkla
             for a_tag in soup.find_all('a', href=True):
                 href = a_tag['href']
                 title = a_tag.get_text(strip=True)
-                
-                # Anlamlı başlık ve ilan formatı kontrolü
+
                 if title and len(title) > 12 and any(k in title.upper() for k in ["ALACAK", "ALIMI", "PERSONEL", "MEMUR", "SÖZLEŞMELİ"]):
                     full_link = urljoin(base_url, href)
                     ilanlar.append({
@@ -118,10 +116,11 @@ def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
     return ilanlar
 
 def ilan_detay_getir(url: str) -> str:
-    """İlan detay sayfasından veya API'den temizlenmiş metin çeker."""
+    """İlan detay sayfasından BeautifulSoup kullanarak daha temiz metin çeker."""
     if not url:
         return ""
     try:
+        # 1. Kariyer Kapısı API Denemesi
         match = re.search(r'i=([a-f0-9-]+)', url, re.IGNORECASE)
         if match:
             guid = match.group(1)
@@ -132,17 +131,22 @@ def ilan_detay_getir(url: str) -> str:
                     data = res.json()
                     metin = data.get('Metin', '') or data.get('Açıklama', '') or str(data)
                     if metin and len(metin) > 50:
-                        clean_text = re.sub(r'<[^>]+>', ' ', metin)
-                        return " ".join(html.unescape(clean_text).split())
+                        soup = BeautifulSoup(metin, "html.parser")
+                        return soup.get_text(separator=' ', strip=True)
                 except Exception:
                     pass
 
+        # 2. Genel Web Kazıma (BeautifulSoup ile DOM Temizliği)
         res = requests.get(url, headers=HEADERS, timeout=10)
         if res.status_code == 200:
-            clean_text = re.sub(r'<script.*?>.*?</script>', '', res.text, flags=re.DOTALL | re.IGNORECASE)
-            clean_text = re.sub(r'<style.*?>.*?</style>', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
-            clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
-            return " ".join(html.unescape(clean_text).split())
+            soup = BeautifulSoup(res.text, "html.parser")
+            
+            # Script, Style vb. görünmeyen elemanları kaldır
+            for element in soup(["script", "style", "header", "footer", "nav"]):
+                element.extract()
+                
+            text = soup.get_text(separator=' ', strip=True)
+            return text
     except Exception as e:
         logging.debug(f"İlan detayı çekilemedi ({url}): {e}")
     return ""
@@ -187,7 +191,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
     # 5. KONTROL: Kesin Uyumsuz Unvanlar
     kesin_uyumsuz_unvanlar = [
         "mühendis", "doktor", "hemşire", "biyolog", "eczacı", "psikolog",
-        "mimar", "pilot", "kaptan", "öğretim üyesi", "yazılım uzmanı"
+        "mimar", "pilot", "kaptan", "öğretim üyesi", "yazılım uzmanı", "bilişim"
     ]
     if any(unvan in baslik_tr for unvan in kesin_uyumsuz_unvanlar):
         return "🔴 BAŞVURAMAZSIN", "İlan unvanı Önlisans/Adalet profili ile uyuşmuyor."
@@ -198,15 +202,15 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
         "büro personeli", "koruma ve güvenlik", "cezaevi", "mahkeme"
     ]
     if any(k in baslik_tr or k in metin_tr for k in yuksek_uyumlu_anahtarlar):
-        if "önlisans" in metin_tr or "ön lisans" in metin_tr or any(k in baslik_tr for k in yuksek_uyumlu_anahtarlar):
-            return "🟢 BAŞVURABİLİRSİN", "Adalet/Önlisans profilinizle doğrudan uyumlu pozisyon."
+        return "🟢 BAŞVURABİLİRSİN", "Adalet/Önlisans profilinizle doğrudan uyumlu pozisyon."
 
     # 7. KONTROL: Genel Önlisans Kontenjanı
     if "önlisans" in metin_tr or "ön lisans" in metin_tr:
         return "🟢 BAŞVURABİLİRSİN", "Önlisans mezuniyeti şartı sağlayan genel kontenjan."
 
-    if len(detay_metni) < 100:
-        return "🟡 KONTROL GEREKİYOR", "Detay metni yetersiz. İlanın genel başlığını manuel inceleyiniz."
+    # Görseldeki Hatayı Önleyen Kısım: Detay Metni Çekilemediyse Verilecek Mesaj
+    if len(detay_metni) < 50:
+        return "🟡 KONTROL GEREKİYOR", "İlan detay metni çekilemedi, başlığı genel kontrol ediniz."
 
     return "🟡 KONTROL GEREKİYOR", "Özel şartların manuel olarak kontrol edilmesi önerilir."
 
@@ -217,7 +221,7 @@ def main() -> None:
 
     sent_ids = load_sent_ids()
     new_sent_ids = set(sent_ids)
-    
+
     ilanlar: List[Dict[str, str]] = []
 
     # 1. Kariyer Kapısı RSS Servisinden Veri Çekme
@@ -267,7 +271,7 @@ def main() -> None:
         kaynak = ilan.get('source', 'Kamu Portalı')
 
         ilan_id = generate_id(link if link else baslik)
-        
+
         if ilan_id in sent_ids:
             continue
 
@@ -295,7 +299,7 @@ def main() -> None:
     # Telegram Bildirim Yönetimi
     if yeni_green or yeni_yellow:
         msg = "📢 <b>YENİ KAMU İLANLARI TESPİT EDİLDİ</b>\n\n"
-        
+
         if yeni_green:
             msg += "🟢 <b>BAŞVURABİLECEĞİNİZ İLANLAR:</b>\n" + "\n\n".join(yeni_green) + "\n\n"
         if yeni_yellow:
