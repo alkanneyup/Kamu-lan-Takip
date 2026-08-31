@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple, Set
 from bs4 import BeautifulSoup
 from iskur import iskur_ilanlarini_getir
 
-# Telegram Bot Handler kütüphaneleri (pip install python-telegram-bot)
+# Telegram Bot Kütüphaneleri
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -132,7 +132,6 @@ def send_telegram_message(text: str) -> None:
     max_len = 3000
     chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)] if len(text) > max_len else [text]
 
-    # Her kayıtlı kullanıcı için mesaj gönderme döngüsü
     for target_chat_id in chat_ids:
         for chunk in chunks:
             payload = {
@@ -249,7 +248,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
 
     if "sadece kadın" in metin_tr or "kadın adaylar" in metin_tr:
         if "erkek" not in metin_tr:
-            return "🔴 BAŞVURAMAZSIN", "İlan yalnızca kadın adaylar için kontenjan ayırmıştır."
+            return "🔴 BAŞVURAMAZSIN", "İlan yalnızca kadın adaylar için kontenjan ayırmılmıştır."
 
     kesin_uyumsuz_unvanlar = [
         "mühendis", "doktor", "hemşire", "biyolog", "eczacı", "psikolog",
@@ -387,10 +386,4 @@ def run_bot_listener():
     app.run_polling()
 
 if __name__ == "__main__":
-    # İlan tarama işlemini bir kez çalıştırır
     main()
-    
-    # Kullanıcı kaydı toplayabilmek için Telegram dinleyicisini çalıştırır
-    # (Eğer betiği sadece saatlik GitHub Actions üzerinde koşturuyorsanız main() tek başına yeterlidir,
-    # ancak botun sürekli açık durup /start komutu dinlemesini istiyorsanız alttaki satırı aktif tutun.)
-    # run_bot_listener()
