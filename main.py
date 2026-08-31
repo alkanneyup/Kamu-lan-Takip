@@ -143,12 +143,17 @@ def send_telegram_message(text: str) -> None:
             try:
                 response = requests.post(url, json=payload, timeout=10)
 
+                # HTML hatası alırsak linkleri koruyarak düz metne dönüştür
                 if response.status_code == 400 and "can't parse entities" in response.text:
-                    logging.warning(f"HTML Parse hatası ({target_chat_id}), düz metin deneniyor...")
-                    clean_plain_text = re.sub(r'<[^>]+>', '', chunk)
+                    logging.warning(f"HTML Parse hatası ({target_chat_id}), linkler açık adres olarak gönderiliyor...")
+                    
+                    # Link etiketlerini 'Başlık (URL)' formatına dönüştürür
+                    fallback_text = re.sub(r'<a\s+href=["\']([^"\']+)["\']\s*>(.*?)</a>', r'\2 (\1)', chunk)
+                    fallback_text = re.sub(r'<[^>]+>', '', fallback_text)
+                    
                     payload_fallback = {
                         "chat_id": target_chat_id,
-                        "text": clean_plain_text,
+                        "text": fallback_text,
                         "disable_web_page_preview": True
                     }
                     requests.post(url, json=payload_fallback, timeout=10)
@@ -342,14 +347,15 @@ def main() -> None:
 
         logging.info(f"[{idx}/{len(ilanlar)}] ({kaynak}) {baslik} -> {durum}")
 
-        # Telegram HTML Formatı İçin Temizlik Ve Link Yapılandırması
+        # Telegram HTML Güvenlik Temizlikleri
         clean_title = html.escape(baslik)
         clean_aciklama = html.escape(aciklama)
         clean_kaynak = html.escape(kaynak)
 
         if link and link.startswith("http"):
-            clean_link = html.escape(link)
-            item_str = f"• [{clean_kaynak}] <a href=\"{clean_link}\"><b>{clean_title}</b></a>\n  📌 <i>{clean_aciklama}</i>"
+            # URL içerisindeki & işaretlerini Telegram uyumlu hale getir
+            safe_link = html.escape(link)
+            item_str = f"• [{clean_kaynak}] <a href=\"{safe_link}\"><b>{clean_title}</b></a>\n  📌 <i>{clean_aciklama}</i>"
         else:
             item_str = f"• [{clean_kaynak}] <b>{clean_title}</b>\n  📌 <i>{clean_aciklama}</i>"
 
