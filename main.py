@@ -342,12 +342,14 @@ def main() -> None:
 
         logging.info(f"[{idx}/{len(ilanlar)}] ({kaynak}) {baslik} -> {durum}")
 
+        # Telegram HTML Formatı İçin Temizlik Ve Link Yapılandırması
         clean_title = html.escape(baslik)
-        clean_aciklama = html.escape(aciklama).replace('<', '&lt;').replace('>', '&gt;')
+        clean_aciklama = html.escape(aciklama)
         clean_kaynak = html.escape(kaynak)
 
-        if link:
-            item_str = f"• [{clean_kaynak}] <a href='{link}'><b>{clean_title}</b></a>\n  📌 <i>{clean_aciklama}</i>"
+        if link and link.startswith("http"):
+            clean_link = html.escape(link)
+            item_str = f"• [{clean_kaynak}] <a href=\"{clean_link}\"><b>{clean_title}</b></a>\n  📌 <i>{clean_aciklama}</i>"
         else:
             item_str = f"• [{clean_kaynak}] <b>{clean_title}</b>\n  📌 <i>{clean_aciklama}</i>"
 
