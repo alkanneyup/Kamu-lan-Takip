@@ -393,4 +393,4 @@ if __name__ == "__main__":
     # Kullanıcı kaydı toplayabilmek için Telegram dinleyicisini çalıştırır
     # (Eğer betiği sadece saatlik GitHub Actions üzerinde koşturuyorsanız main() tek başına yeterlidir,
     # ancak botun sürekli açık durup /start komutu dinlemesini istiyorsanız alttaki satırı aktif tutun.)
-    # run_bot_listener()
+     run_bot_listener()
