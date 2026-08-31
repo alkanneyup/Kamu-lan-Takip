@@ -2,42 +2,36 @@ name: Kamu İlan Takip Otomasyonu
 
 on:
   schedule:
-    # Her saat başı çalışması için cron zamanlaması
-    - cron: '0 * * * *'
-  workflow_dispatch: # Manuel tetikleme butonu
+    - cron: '0 * * * *'  # Her saat başı otomatik çalışır
+  workflow_dispatch:      # GitHub panosundan manuel çalıştırma butonu sağlar
 
 jobs:
-  build:
+  run-bot:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Repoyu Kopyala (Checkout)
-      uses: actions/checkout@v3
+      - name: Repoyu Kopyala (Checkout)
+        uses: actions/checkout@v4
 
-    - name: Python Ortamını Kur
-      uses: actions/setup-python@v4
-      with:
-        python-python-version: '3.11'
+      - name: Python Ortamını Kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    # --- EKLENECEK KISIM BURASI ---
-    - name: Gerekli Kütüphaneleri Yükle
-      run: |
-        python -m pip install --upgrade pip
-        pip install requests beautifulsoup4 python-telegram-bot
-    # -------------------------------
+      - name: Gerekli Kütüphaneleri Yükle
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 python-telegram-bot
 
-    - name: Otomasyon Kodunu Çalıştır
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      - name: Otomasyon Kodunu Çalıştır
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: python main.py
 
-      - name: Veri Durumunu (sent_ids.json) Güncelle ve Commit Et
+      - name: Gönderilen İlanları ve Kullanıcıları Kaydet (Git Push)
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add sent_ids.json
-          git diff --quiet && git diff --staged --quiet || (
-            git commit -m "chore: otomatik durum güncellemesi [skip ci]" && \
-            git pull --rebase origin main && \
-            git push
-          )
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add sent_ids.json kullanicilar.txt || true
+          git commit -m "Auto-update: sent_ids and kullanicilar" || exit 0
+          git push
