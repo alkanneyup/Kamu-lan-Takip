@@ -43,7 +43,7 @@ def tr_lower(metin: str) -> str:
 
 def generate_id(metin: str) -> str:
     """Benzersiz ilan kimliği oluşturur."""
-    return hashlib.md5(metin.encode('utf-utf-8' if False else 'utf-8')).hexdigest()
+    return hashlib.md5(metin.encode('utf-8')).hexdigest()
 
 def load_sent_ids() -> Set[str]:
     """Daha önce bildirilen ilan kimliklerini yükler."""
@@ -152,30 +152,30 @@ def ilan_detay_getir(url: str) -> str:
     return ""
 
 def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
-    """Adayın Önlisans / Adalet profiline göre gelişmiş filtreleme yapısı."""
+    """
+    Adayın Profiline Özel Analiz Engine:
+    - Özel Nitelikler (Adalet & 3001 Herhangi Bir Önlisans)
+    - Sert Şartlar (KPSS, Yaş, Cinsiyet)
+    """
     baslik_tr = tr_lower(baslik)
+    
+    # "Mimar Sinan" gibi kurum adı çakışmalarını temizle
+    baslik_filtreli = re.sub(r'\bmimar\s+sinan\b', '', baslik_tr)
+    
     metin_tr = tr_lower(baslik + " " + detay_metni)
 
-    egitim_terimleri = ["önlisans", "ön lisans", "myo", "meslek yüksekokulu", "2 yıllık", "3001"]
-
-    kesin_uyumsuz_meslekler = [
-        "mühendis", "doktor", "hemşire", "biyolog", "eczacı", "psikolog",
-        "mimar", "pilot", "kaptan", "öğretim üyesi", "yazılım uzmanı", "öğretmen",
-        "veteriner", "tekniker", "teknisyen"
-    ]
-
-    # 1. KPSS Taban Puan Kontrolü
+    # 1. KONTROL: Dinamik KPSS Puan Kontrolü (Aday Puanı: 76.29)
     kpss_matches = re.findall(r'(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)', metin_tr)
     for match in kpss_matches:
         try:
             req_score = float(match.replace(',', '.'))
             if 50.0 <= req_score <= 100.0:
                 if USER_PROFILE["kpss"] < req_score:
-                    return "🔴 BAŞVURAMAZSIN", f"KPSS puanınız ({USER_PROFILE['kpss']}) gerekli taban puanın ({req_score}) altında."
+                    return "🔴 BAŞVURAMAZSIN", f"KPSS puanınız ({USER_PROFILE['kpss']}) ilanın taban puanının ({req_score}) altında."
         except ValueError:
             continue
 
-    # 2. Yaş Sınırı Kontrolü
+    # 2. KONTROL: Yaş Sınırı Kontrolü (Aday Yaşı: 29)
     yas_matches = re.findall(r'([0-9]{2})\s*yaşını\s*(?:doldurmamış|bitirmemiş|aşmamış|gün almamış)', metin_tr)
     for match in yas_matches:
         try:
@@ -186,27 +186,56 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
         except ValueError:
             continue
 
-    # 3. Başlıkta Belirli Olumsuz Unvan Kontrolü (Başlıkta Adalet/Büro/Destek geçmiyorsa elenir)
-    if any(m in baslik_tr for m in kesin_uyumsuz_meslekler) and not any(k in baslik_tr for k in ["büro", "adalet", "katip", "mübaşir", "güvenlik", "destek"]):
-        return "🔴 BAŞVURAMAZSIN", "İlan unvanı Adalet / Önlisans nitelikleriyle uyuşmuyor."
+    # 3. KONTROL: Cinsiyet Kontrolü
+    if ("sadece kadın" in metin_tr or "kadın adaylar" in metin_tr) and "erkek" not in metin_tr:
+        return "🔴 BAŞVURAMAZSIN", "İlan yalnızca kadın adaylar için kontenjan ayırmıştır."
 
-    # 4. Yalnızca Lisans Şartı
-    if ("sadece lisans" in metin_tr or "yalnızca lisans" in metin_tr) and not any(e in metin_tr for e in egitim_terimleri):
-        if not any(g in baslik_tr for g in ["4/b", "sözleşmeli", "personel alım", "personel alımı"]):
-            return "🔴 BAŞVURAMAZSIN", "İlan yalnızca Lisans mezuniyeti şartı arıyor."
+    # 4. KONTROL: Başlıkta Belirli Tekil Meslek Kontrolü (Başlıkta genel büro/sözleşmeli geçmiyorsa elenir)
+    kesin_uyumsuz_meslekler = [
+        "mühendis", "doktor", "hemşire", "biyolog", "eczacı", "psikolog",
+        "mimar", "pilot", "kaptan", "öğretim üyesi", "yazılım uzmanı", "öğretmen",
+        "veteriner", "tekniker", "teknisyen"
+    ]
+    if any(re.search(r'\b' + m + r'\b', baslik_filtreli) for m in kesin_uyumsuz_meslekler):
+        if not any(k in baslik_tr for k in ["büro", "adalet", "katip", "mübaşir", "güvenlik", "destek", "sözleşmeli", "4/b", "personel"]):
+            return "🔴 BAŞVURAMAZSIN", "İlan unvanı Adalet / Önlisans nitelikleriyle uyuşmuyor."
 
-    # 5. Doğrudan Uyumlu Başlıklar veya Metin Şartları
-    if any(k in baslik_tr for k in ["adalet", "katip", "mübaşir", "büro personeli", "icra"]):
-        return "🟢 BAŞVURABİLİRSİN", "Başlık Adalet/Büro profiliyle doğrudan uyumlu."
+    # 5. ÖZEL NİTELİK & BÖLÜM TARAMASI (Adalet & Herhangi Bir Önlisans / 3001)
+    
+    # A) Adalet Özel Niteliği
+    adalet_anahtarlari = [
+        "adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi", "icra müdür", 
+        "infaz koruma", "cezaevi", "mahkeme", "adalet bakanlığı"
+    ]
+    if any(k in metin_tr or k in baslik_tr for k in adalet_anahtarlari):
+        return "🟢 BAŞVURABİLİRSİN", "Özel niteliklerde 'Adalet' bölümü veya kadrosu tespit edildi."
 
-    if any(e in metin_tr for e in egitim_terimleri) or any(k in metin_tr for k in ["adalet", "büro personeli", "zabıt katibi", "mübaşir", "icra"]):
-        return "🟢 BAŞVURABİLİRSİN", "İlan metninde Önlisans / Büro / Adalet şartları tespit edildi."
+    # B) Herhangi Bir Önlisans (3001 Nitelik Kodu) Özel Niteliği
+    herhangi_onlisans_anahtarlari = [
+        "3001", "herhangi bir önlisans", "herhangi bir ön lisans", 
+        "önlisans programlarının birinden", "ön lisans programlarının birinden",
+        "herhangi bir meslek yüksekokulu", "tüm önlisans", "alan gözetmeksizin",
+        "önlisans mezunu olmak"
+    ]
+    if any(k in metin_tr for k in herhangi_onlisans_anahtarlari):
+        return "🟢 BAŞVURABİLİRSİN", "Özel niteliklerde 'Herhangi bir Önlisans (3001)' şartı tespit edildi."
 
-    # 6. Genel 4/B Sözleşmeli Personel Alımları (Toplu Üniversite ve Kamu Alımları)
+    # C) Genel Büro / İdari Kadro Şartları
+    genel_idari_kadrolar = [
+        "büro personeli", "veri hazırlama", "vhki", "bilgisayar işletmeni",
+        "koruma ve güvenlik", "destek personeli", "memur"
+    ]
+    egitim_terimleri = ["önlisans", "ön lisans", "myo", "meslek yüksekokulu", "2 yıllık"]
+    
+    if any(k in metin_tr or k in baslik_tr for k in genel_idari_kadrolar):
+        if any(e in metin_tr for e in egitim_terimleri) or any(g in baslik_tr for g in ["4/b", "sözleşmeli", "personel alımı"]):
+            return "🟢 BAŞVURABİLİRSİN", "Özel niteliklerde Önlisans düzeyinde genel kadro (Büro/VHKİ/Destek) tespit edildi."
+
+    # D) Toplu 4/B ve Üniversite / Kamu Alımları
     if any(g in baslik_tr for g in ["4/b", "sözleşmeli personel", "personel alım", "memur alım"]):
-        return "🟢 BAŞVURABİLİRSİN", "Toplu 4/B sözleşmeli personel alımı (Önlisans/Büro kontenjanı içerebilir)."
+        return "🟢 BAŞVURABİLİRSİN", "Toplu 4/B sözleşmeli personel alımı (Önlisans/Büro/3001 kontenjanı içerebilir)."
 
-    return "🟡 KONTROL GEREKİYOR", "Özel şartların manuel incelenmesi önerilir."
+    return "🟡 KONTROL GEREKİYOR", "Özel niteliklerin detaylı incelenmesi önerilir."
 
 def main() -> None:
     logging.info("============================================================")
