@@ -43,7 +43,7 @@ def tr_lower(metin: str) -> str:
 
 def generate_id(metin: str) -> str:
     """Benzersiz ilan kimliği oluşturur."""
-    return hashlib.md5(metin.encode('utf-8')).hexdigest()
+    return hashlib.md5(metin.encode('utf-utf-8' if False else 'utf-8')).hexdigest()
 
 def load_sent_ids() -> Set[str]:
     """Daha önce bildirilen ilan kimliklerini yükler."""
@@ -93,7 +93,7 @@ def send_telegram_message(text: str) -> None:
             logging.error(f"Telegram mesajı gönderilirken istisna oluştu: {e}")
 
 def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
-    """T.C. Cumhurbaşkanlığı SBB Kamu İlan portalından ilanları gelişmiş filtreleme ile çeker."""
+    """T.C. Cumhurbaşkanlığı SBB Kamu İlan portalından ilanları çeker."""
     ilanlar: List[Dict[str, str]] = []
     base_url = "https://kamuilan.sbb.gov.tr/"
     try:
@@ -103,8 +103,6 @@ def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
             for a_tag in soup.find_all('a', href=True):
                 href = a_tag['href']
                 title = a_tag.get_text(strip=True)
-                
-                # Esnetilmiş Başlık Taraması: Kamu ilanlarında geçen genel kelimeler
                 if title and len(title) > 10:
                     title_lower = tr_lower(title)
                     anahtar_kelimeler = [
@@ -124,7 +122,7 @@ def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
     return ilanlar
 
 def ilan_detay_getir(url: str) -> str:
-    """İlan detay sayfasından veya API'den temizlenmiş metin çeker."""
+    """İlan detay sayfasından metin çeker."""
     if not url:
         return ""
     try:
@@ -154,25 +152,19 @@ def ilan_detay_getir(url: str) -> str:
     return ""
 
 def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
-    """Adayın Önlisans / Adalet (KPSS 76.29, Erkek, 29) profiline göre hassas analiz."""
+    """Adayın Önlisans / Adalet profiline göre gelişmiş filtreleme yapısı."""
     baslik_tr = tr_lower(baslik)
     metin_tr = tr_lower(baslik + " " + detay_metni)
 
-    # Adalet Önlisans Uyumlu Kadro ve Bölüm Terimleri
-    adalet_kadrolari = [
-        "adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi", "icra müdür", 
-        "infaz koruma", "büro personeli", "veri hazırlama", "vhki", "bilgisayar işletmeni",
-        "koruma ve güvenlik", "cezaevi", "mahkeme", "adalet bakanlığı", "destek personeli"
-    ]
-    
     egitim_terimleri = ["önlisans", "ön lisans", "myo", "meslek yüksekokulu", "2 yıllık", "3001"]
 
-    # 1. KONTROL: Yalnızca Lisans Mezunu Aranıyorsa (Önlisans Geçmiyorsa)
-    if ("lisans mezunu" in metin_tr or "lisans derecesi" in metin_tr or "fakülte" in metin_tr):
-        if not any(e in metin_tr for e in egitim_terimleri):
-            return "🔴 BAŞVURAMAZSIN", "İlan yalnızca Lisans mezuniyeti şartı arıyor."
+    kesin_uyumsuz_meslekler = [
+        "mühendis", "doktor", "hemşire", "biyolog", "eczacı", "psikolog",
+        "mimar", "pilot", "kaptan", "öğretim üyesi", "yazılım uzmanı", "öğretmen",
+        "veteriner", "tekniker", "teknisyen"
+    ]
 
-    # 2. KONTROL: Dinamik KPSS Puan Kontrolü
+    # 1. KPSS Taban Puan Kontrolü
     kpss_matches = re.findall(r'(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)', metin_tr)
     for match in kpss_matches:
         try:
@@ -183,7 +175,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
         except ValueError:
             continue
 
-    # 3. KONTROL: Dinamik Yaş Sınırı
+    # 2. Yaş Sınırı Kontrolü
     yas_matches = re.findall(r'([0-9]{2})\s*yaşını\s*(?:doldurmamış|bitirmemiş|aşmamış|gün almamış)', metin_tr)
     for match in yas_matches:
         try:
@@ -194,32 +186,25 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
         except ValueError:
             continue
 
-    # 4. KONTROL: Kesin Uyumsuz Spesifik Meslekler (Sadece Başlıkta Aranır)
-    kesin_uyumsuz_meslekler = [
-        "mühendis", "doktor", "hemşire", "biyolog", "eczacı", "psikolog",
-        "mimar", "pilot", "kaptan", "öğretim üyesi", "yazılım uzmanı", "öğretmen",
-        "veteriner", "tekniker", "teknisyen"
-    ]
-    # Eğer başlıkta hem uyumsuz meslek hem de adalet kadrosu yoksa engelle
-    if any(m in baslik_tr for m in kesin_uyumsuz_meslekler) and not any(k in baslik_tr for k in adalet_kadrolari):
+    # 3. Başlıkta Belirli Olumsuz Unvan Kontrolü (Başlıkta Adalet/Büro/Destek geçmiyorsa elenir)
+    if any(m in baslik_tr for m in kesin_uyumsuz_meslekler) and not any(k in baslik_tr for k in ["büro", "adalet", "katip", "mübaşir", "güvenlik", "destek"]):
         return "🔴 BAŞVURAMAZSIN", "İlan unvanı Adalet / Önlisans nitelikleriyle uyuşmuyor."
 
-    # 5. KONTROL: Yüksek Uyumlu Doğrudan Pozisyonlar
-    if any(k in baslik_tr for k in adalet_kadrolari):
-        return "🟢 BAŞVURABİLİRSİN", "Başlık Adalet/Önlisans profilinizle doğrudan uyumlu."
+    # 4. Yalnızca Lisans Şartı
+    if ("sadece lisans" in metin_tr or "yalnızca lisans" in metin_tr) and not any(e in metin_tr for e in egitim_terimleri):
+        if not any(g in baslik_tr for g in ["4/b", "sözleşmeli", "personel alım", "personel alımı"]):
+            return "🔴 BAŞVURAMAZSIN", "İlan yalnızca Lisans mezuniyeti şartı arıyor."
 
-    # 6. KONTROL: Metin İçeriğinde Adalet veya Önlisans
-    if any(k in metin_tr for k in adalet_kadrolari) and any(e in metin_tr for e in egitim_terimleri):
-        return "🟢 BAŞVURABİLİRSİN", "İlan detayında Önlisans ve Adalet/İdari şartları tespit edildi."
+    # 5. Doğrudan Uyumlu Başlıklar veya Metin Şartları
+    if any(k in baslik_tr for k in ["adalet", "katip", "mübaşir", "büro personeli", "icra"]):
+        return "🟢 BAŞVURABİLİRSİN", "Başlık Adalet/Büro profiliyle doğrudan uyumlu."
 
-    # 7. KONTROL: Genel Önlisans Kontenjanı
-    if any(e in metin_tr for e in egitim_terimleri):
-        return "🟢 BAŞVURABİLİRSİN", "Genel Önlisans (3001 veya benzeri) alım şartı içeriyor."
+    if any(e in metin_tr for e in egitim_terimleri) or any(k in metin_tr for k in ["adalet", "büro personeli", "zabıt katibi", "mübaşir", "icra"]):
+        return "🟢 BAŞVURABİLİRSİN", "İlan metninde Önlisans / Büro / Adalet şartları tespit edildi."
 
-    # 8. KONTROL: Detay Metni Yetersiz Ama Başlık Genel Memur Alımı İse
-    genel_alims = ["personel alımı", "memur alımı", "sözleşmeli personel", "işçi alımı", "eleman alımı"]
-    if any(g in baslik_tr for g in genel_alims):
-        return "🟡 KONTROL GEREKİYOR", "Genel personel alımı başlığı. Özel şartları kontrol ediniz."
+    # 6. Genel 4/B Sözleşmeli Personel Alımları (Toplu Üniversite ve Kamu Alımları)
+    if any(g in baslik_tr for g in ["4/b", "sözleşmeli personel", "personel alım", "memur alım"]):
+        return "🟢 BAŞVURABİLİRSİN", "Toplu 4/B sözleşmeli personel alımı (Önlisans/Büro kontenjanı içerebilir)."
 
     return "🟡 KONTROL GEREKİYOR", "Özel şartların manuel incelenmesi önerilir."
 
@@ -233,27 +218,18 @@ def main() -> None:
     
     ilanlar: List[Dict[str, str]] = []
 
-    # 1. Kariyer Kapısı RSS Servisinden Veri Çekme
-    rss_url = "https://kariyerkapisi.gov.tr/RSS"
     try:
-        res = requests.get(rss_url, headers=HEADERS, timeout=12)
+        res = requests.get("https://kariyerkapisi.gov.tr/RSS", headers=HEADERS, timeout=12)
         if res.status_code == 200:
             root = ET.fromstring(res.content)
             for item in root.findall('./channel/item'):
                 title = item.find('title').text if item.find('title') is not None else ''
                 link = item.find('link').text if item.find('link') is not None else ''
                 if title:
-                    ilanlar.append({
-                        'title': title.strip(),
-                        'link': link.strip(),
-                        'source': 'Kariyer Kapısı'
-                    })
-        else:
-            logging.warning(f"Kariyer Kapısı RSS yanıt vermedi. Yanıt Kodu: {res.status_code}")
+                    ilanlar.append({'title': title.strip(), 'link': link.strip(), 'source': 'Kariyer Kapısı'})
     except Exception as e:
         logging.error(f"Kariyer Kapısı RSS işleme hatası: {e}")
 
-    # 2. SBB Kamu İlan Portalından Veri Çekme
     try:
         sbb_ilanlari = sbb_kamu_ilan_getir()
         if sbb_ilanlari:
@@ -261,7 +237,6 @@ def main() -> None:
     except Exception as e:
         logging.error(f"SBB Kamu İlan verileri alınırken hata oluştu: {e}")
 
-    # 3. İŞKUR Modülünden Veri Çekme
     try:
         iskur_ilanlari = iskur_ilanlarini_getir()
         if iskur_ilanlari:
@@ -305,10 +280,8 @@ def main() -> None:
             yeni_yellow.append(item_str)
             new_sent_ids.add(ilan_id)
 
-    # Telegram Bildirim Yönetimi
     if yeni_green or yeni_yellow:
         msg = "📢 <b>YENİ KAMU İLANLARI TESPİT EDİLDİ</b>\n\n"
-        
         if yeni_green:
             msg += "🟢 <b>BAŞVURABİLECEĞİNİZ İLANLAR:</b>\n" + "\n\n".join(yeni_green) + "\n\n"
         if yeni_yellow:
