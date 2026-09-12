@@ -65,24 +65,46 @@ def save_sent_ids(sent_ids: Set[str]) -> None:
     except Exception as e:
         logging.error(f"sent_ids.json kaydetme hatası: {e}")
 
-def send_telegram_message(text: str) -> bool:
-    """Telegram üzerinden güvenli biçimde bildirim gönderir. Başarılı ise True döner."""
+def send_telegram_messages(green_items: List[str], yellow_items: List[str]) -> bool:
+    """Telegram mesajlarını HTML etiketlerini bölmeden akıllı paketler halinde gönderir."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     
     if not bot_token or not chat_id:
-        logging.error("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID ortam değişkenlerinde bulunamadı! Mesaj gönderilemedi.")
+        logging.error("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID bulunamadı!")
         return False
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    max_len = 3800
-    chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)] if len(text) > max_len else [text]
+    messages: List[str] = []
+    current_msg = "📢 <b>YENİ KAMU İLANLARI TESPİT EDİLDİ</b>\n\n"
+
+    if green_items:
+        current_msg += "🟢 <b>BAŞVURABİLECEĞİNİZ İLANLAR:</b>\n"
+        for item in green_items:
+            if len(current_msg) + len(item) + 4 > 3500:
+                messages.append(current_msg)
+                current_msg = "🟢 <b>BAŞVURABİLECEĞİNİZ İLANLAR (Devam):</b>\n"
+            current_msg += item + "\n\n"
+
+    if yellow_items:
+        if len(current_msg) + 60 > 3500:
+            messages.append(current_msg)
+            current_msg = ""
+        current_msg += "🟡 <b>KONTROL ETMENİZ GEREKEN İLANLAR:</b>\n"
+        for item in yellow_items:
+            if len(current_msg) + len(item) + 4 > 3500:
+                messages.append(current_msg)
+                current_msg = "🟡 <b>KONTROL ETMENİZ GEREKEN İLANLAR (Devam):</b>\n"
+            current_msg += item + "\n\n"
+
+    if current_msg.strip():
+        messages.append(current_msg)
 
     all_success = True
-    for chunk in chunks:
+    for msg in messages:
         payload = {
             "chat_id": chat_id,
-            "text": chunk,
+            "text": msg.strip(),
             "parse_mode": "HTML",
             "disable_web_page_preview": True
         }
@@ -288,18 +310,12 @@ def main() -> None:
 
     # Telegram Bildirim Yönetimi
     if yeni_green or yeni_yellow:
-        msg = "📢 <b>YENİ KAMU İLANLARI TESPİT EDİLDİ</b>\n\n"
-        if yeni_green:
-            msg += "🟢 <b>BAŞVURABİLECEĞİNİZ İLANLAR:</b>\n" + "\n\n".join(yeni_green) + "\n\n"
-        if yeni_yellow:
-            msg += "🟡 <b>KONTROL ETMENİZ GEREKEN İLANLAR:</b>\n" + "\n\n".join(yeni_yellow) + "\n\n"
-
-        sent_success = send_telegram_message(msg)
+        sent_success = send_telegram_messages(yeni_green, yeni_yellow)
         if sent_success:
             save_sent_ids(new_sent_ids)
-            logging.info("İlanlar Telegram üzerinden bildirildi ve sent_ids.json güncellendi.")
+            logging.info("Tüm ilanlar Telegram üzerinden başarıyla bildirildi ve sent_ids.json güncellendi.")
         else:
-            logging.error("Telegram bildirimi başarısız olduğu için veriler hafızaya kaydedilmedi. Ayarları kontrol edip tekrar çalıştırın.")
+            logging.error("Telegram bildirimi sırasında hata oluştu. Veriler hafızaya kaydedilmedi.")
     else:
         logging.info("Kriterlere uygun yeni bildirilecek ilan bulunamadı.")
 
