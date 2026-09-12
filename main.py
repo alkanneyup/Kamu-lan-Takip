@@ -65,19 +65,20 @@ def save_sent_ids(sent_ids: Set[str]) -> None:
     except Exception as e:
         logging.error(f"sent_ids.json kaydetme hatası: {e}")
 
-def send_telegram_message(text: str) -> None:
-    """Telegram üzerinden güvenli biçimde bildirim gönderir."""
+def send_telegram_message(text: str) -> bool:
+    """Telegram üzerinden güvenli biçimde bildirim gönderir. Başarılı ise True döner."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    
     if not bot_token or not chat_id:
-        logging.warning("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID bulunamadı!")
-        return
+        logging.error("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID ortam değişkenlerinde bulunamadı! Mesaj gönderilemedi.")
+        return False
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    
     max_len = 3800
     chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)] if len(text) > max_len else [text]
 
+    all_success = True
     for chunk in chunks:
         payload = {
             "chat_id": chat_id,
@@ -89,8 +90,12 @@ def send_telegram_message(text: str) -> None:
             response = requests.post(url, json=payload, timeout=10)
             if response.status_code != 200:
                 logging.error(f"Telegram API Hatası: {response.status_code} - {response.text}")
+                all_success = False
         except Exception as e:
             logging.error(f"Telegram mesajı gönderilirken istisna oluştu: {e}")
+            all_success = False
+
+    return all_success
 
 def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
     """T.C. Cumhurbaşkanlığı SBB Kamu İlan portalından ilanları çeker."""
@@ -152,19 +157,12 @@ def ilan_detay_getir(url: str) -> str:
     return ""
 
 def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
-    """
-    Adayın Profiline Özel Analiz Engine:
-    - Özel Nitelikler (Adalet & 3001 Herhangi Bir Önlisans)
-    - Sert Şartlar (KPSS, Yaş, Cinsiyet)
-    """
+    """Adayın Önlisans / Adalet profiline özel detaylı analiz."""
     baslik_tr = tr_lower(baslik)
-    
-    # "Mimar Sinan" gibi kurum adı çakışmalarını temizle
     baslik_filtreli = re.sub(r'\bmimar\s+sinan\b', '', baslik_tr)
-    
     metin_tr = tr_lower(baslik + " " + detay_metni)
 
-    # 1. KONTROL: Dinamik KPSS Puan Kontrolü (Aday Puanı: 76.29)
+    # 1. KPSS Kontrolü
     kpss_matches = re.findall(r'(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)', metin_tr)
     for match in kpss_matches:
         try:
@@ -175,7 +173,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
         except ValueError:
             continue
 
-    # 2. KONTROL: Yaş Sınırı Kontrolü (Aday Yaşı: 29)
+    # 2. Yaş Kontrolü
     yas_matches = re.findall(r'([0-9]{2})\s*yaşını\s*(?:doldurmamış|bitirmemiş|aşmamış|gün almamış)', metin_tr)
     for match in yas_matches:
         try:
@@ -186,11 +184,11 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
         except ValueError:
             continue
 
-    # 3. KONTROL: Cinsiyet Kontrolü
+    # 3. Cinsiyet Kontrolü
     if ("sadece kadın" in metin_tr or "kadın adaylar" in metin_tr) and "erkek" not in metin_tr:
         return "🔴 BAŞVURAMAZSIN", "İlan yalnızca kadın adaylar için kontenjan ayırmıştır."
 
-    # 4. KONTROL: Başlıkta Belirli Tekil Meslek Kontrolü (Başlıkta genel büro/sözleşmeli geçmiyorsa elenir)
+    # 4. Meslek Kontrolü
     kesin_uyumsuz_meslekler = [
         "mühendis", "doktor", "hemşire", "biyolog", "eczacı", "psikolog",
         "mimar", "pilot", "kaptan", "öğretim üyesi", "yazılım uzmanı", "öğretmen",
@@ -200,40 +198,19 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
         if not any(k in baslik_tr for k in ["büro", "adalet", "katip", "mübaşir", "güvenlik", "destek", "sözleşmeli", "4/b", "personel"]):
             return "🔴 BAŞVURAMAZSIN", "İlan unvanı Adalet / Önlisans nitelikleriyle uyuşmuyor."
 
-    # 5. ÖZEL NİTELİK & BÖLÜM TARAMASI (Adalet & Herhangi Bir Önlisans / 3001)
-    
-    # A) Adalet Özel Niteliği
-    adalet_anahtarlari = [
-        "adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi", "icra müdür", 
-        "infaz koruma", "cezaevi", "mahkeme", "adalet bakanlığı"
-    ]
-    if any(k in metin_tr or k in baslik_tr for k in adalet_anahtarlari):
+    # 5. Özel Nitelik Taraması (Adalet & 3001 Önlisans)
+    if any(k in metin_tr or k in baslik_tr for k in ["adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi", "infaz koruma"]):
         return "🟢 BAŞVURABİLİRSİN", "Özel niteliklerde 'Adalet' bölümü veya kadrosu tespit edildi."
 
-    # B) Herhangi Bir Önlisans (3001 Nitelik Kodu) Özel Niteliği
-    herhangi_onlisans_anahtarlari = [
-        "3001", "herhangi bir önlisans", "herhangi bir ön lisans", 
-        "önlisans programlarının birinden", "ön lisans programlarının birinden",
-        "herhangi bir meslek yüksekokulu", "tüm önlisans", "alan gözetmeksizin",
-        "önlisans mezunu olmak"
-    ]
-    if any(k in metin_tr for k in herhangi_onlisans_anahtarlari):
+    if any(k in metin_tr for k in ["3001", "herhangi bir önlisans", "önlisans programlarının birinden", "alan gözetmeksizin"]):
         return "🟢 BAŞVURABİLİRSİN", "Özel niteliklerde 'Herhangi bir Önlisans (3001)' şartı tespit edildi."
 
-    # C) Genel Büro / İdari Kadro Şartları
-    genel_idari_kadrolar = [
-        "büro personeli", "veri hazırlama", "vhki", "bilgisayar işletmeni",
-        "koruma ve güvenlik", "destek personeli", "memur"
-    ]
-    egitim_terimleri = ["önlisans", "ön lisans", "myo", "meslek yüksekokulu", "2 yıllık"]
-    
-    if any(k in metin_tr or k in baslik_tr for k in genel_idari_kadrolar):
-        if any(e in metin_tr for e in egitim_terimleri) or any(g in baslik_tr for g in ["4/b", "sözleşmeli", "personel alımı"]):
-            return "🟢 BAŞVURABİLİRSİN", "Özel niteliklerde Önlisans düzeyinde genel kadro (Büro/VHKİ/Destek) tespit edildi."
+    if any(k in metin_tr or k in baslik_tr for k in ["büro personeli", "veri hazırlama", "vhki", "bilgisayar işletmeni", "koruma ve güvenlik", "destek personeli"]):
+        if any(e in metin_tr for e in ["önlisans", "ön lisans", "myo", "2 yıllık"]) or any(g in baslik_tr for g in ["4/b", "sözleşmeli", "personel alımı"]):
+            return "🟢 BAŞVURABİLİRSİN", "Önlisans düzeyinde genel idari kadro tespit edildi."
 
-    # D) Toplu 4/B ve Üniversite / Kamu Alımları
     if any(g in baslik_tr for g in ["4/b", "sözleşmeli personel", "personel alım", "memur alım"]):
-        return "🟢 BAŞVURABİLİRSİN", "Toplu 4/B sözleşmeli personel alımı (Önlisans/Büro/3001 kontenjanı içerebilir)."
+        return "🟢 BAŞVURABİLİRSİN", "Toplu 4/B sözleşmeli personel alımı."
 
     return "🟡 KONTROL GEREKİYOR", "Özel niteliklerin detaylı incelenmesi önerilir."
 
@@ -309,6 +286,7 @@ def main() -> None:
             yeni_yellow.append(item_str)
             new_sent_ids.add(ilan_id)
 
+    # Telegram Bildirim Yönetimi
     if yeni_green or yeni_yellow:
         msg = "📢 <b>YENİ KAMU İLANLARI TESPİT EDİLDİ</b>\n\n"
         if yeni_green:
@@ -316,9 +294,12 @@ def main() -> None:
         if yeni_yellow:
             msg += "🟡 <b>KONTROL ETMENİZ GEREKEN İLANLAR:</b>\n" + "\n\n".join(yeni_yellow) + "\n\n"
 
-        send_telegram_message(msg)
-        save_sent_ids(new_sent_ids)
-        logging.info("Yeni ilanlar Telegram üzerinden bildirildi ve veri durumu güncellendi.")
+        sent_success = send_telegram_message(msg)
+        if sent_success:
+            save_sent_ids(new_sent_ids)
+            logging.info("İlanlar Telegram üzerinden bildirildi ve sent_ids.json güncellendi.")
+        else:
+            logging.error("Telegram bildirimi başarısız olduğu için veriler hafızaya kaydedilmedi. Ayarları kontrol edip tekrar çalıştırın.")
     else:
         logging.info("Kriterlere uygun yeni bildirilecek ilan bulunamadı.")
 
