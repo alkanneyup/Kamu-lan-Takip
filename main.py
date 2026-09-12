@@ -66,13 +66,16 @@ def save_sent_ids(sent_ids: Set[str]) -> None:
         logging.error(f"sent_ids.json kaydetme hatası: {e}")
 
 def send_telegram_messages(green_items: List[str], yellow_items: List[str]) -> bool:
-    """Telegram mesajlarını HTML etiketlerini bölmeden akıllı paketler halinde gönderir."""
+    """Telegram mesajlarını tüm Chat ID'lere HTML etiketlerini bölmeden akıllı paketler halinde gönderir."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    raw_chat_ids = os.getenv("TELEGRAM_CHAT_ID")
     
-    if not bot_token or not chat_id:
+    if not bot_token or not raw_chat_ids:
         logging.error("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID bulunamadı!")
         return False
+
+    # Virgülle ayrılmış birden fazla Chat ID desteği (Örn: "12345,67890")
+    chat_ids = [cid.strip() for cid in raw_chat_ids.split(",") if cid.strip()]
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     messages: List[str] = []
@@ -101,21 +104,24 @@ def send_telegram_messages(green_items: List[str], yellow_items: List[str]) -> b
         messages.append(current_msg)
 
     all_success = True
-    for msg in messages:
-        payload = {
-            "chat_id": chat_id,
-            "text": msg.strip(),
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }
-        try:
-            response = requests.post(url, json=payload, timeout=10)
-            if response.status_code != 200:
-                logging.error(f"Telegram API Hatası: {response.status_code} - {response.text}")
+    for chat_id in chat_ids:
+        for msg in messages:
+            payload = {
+                "chat_id": chat_id,
+                "text": msg.strip(),
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            }
+            try:
+                response = requests.post(url, json=payload, timeout=10)
+                if response.status_code != 200:
+                    logging.error(f"Telegram API Hatası ({chat_id}): {response.status_code} - {response.text}")
+                    all_success = False
+                else:
+                    logging.info(f"Mesaj başarıyla iletildi (Chat ID: {chat_id})")
+            except Exception as e:
+                logging.error(f"Telegram mesajı gönderilirken istisna oluştu ({chat_id}): {e}")
                 all_success = False
-        except Exception as e:
-            logging.error(f"Telegram mesajı gönderilirken istisna oluştu: {e}")
-            all_success = False
 
     return all_success
 
