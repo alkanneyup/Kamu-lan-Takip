@@ -17,9 +17,9 @@ logging.basicConfig(
     format="%(asctime)s - [%(levelname)s] - %(message)s"
 )
 
-# Aday Profil Tanımı
+# Aday Profil Tanımı (Güncellendi)
 USER_PROFILE = {
-    "kpss": 76.29,
+    "kpss": 80.86227,
     "ogrenim": "onlisans",
     "bolum": "adalet",
     "cinsiyet": "erkek",
@@ -74,7 +74,6 @@ def send_telegram_messages(green_items: List[str], yellow_items: List[str]) -> b
         logging.error("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID bulunamadı!")
         return False
 
-    # Virgülle ayrılmış birden fazla Chat ID desteği (Örn: "12345,67890")
     chat_ids = [cid.strip() for cid in raw_chat_ids.split(",") if cid.strip()]
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -190,7 +189,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
     baslik_filtreli = re.sub(r'\bmimar\s+sinan\b', '', baslik_tr)
     metin_tr = tr_lower(baslik + " " + detay_metni)
 
-    # 1. KPSS Kontrolü
+    # 1. KPSS Kontrolü (Güncel Puanınız: 80.86227)
     kpss_matches = re.findall(r'(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)', metin_tr)
     for match in kpss_matches:
         try:
@@ -245,6 +244,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
 def main() -> None:
     logging.info("============================================================")
     logging.info("KAMU İLAN TAKİP VE FİLTRELEME OTOMASYONU BAŞLATILDI")
+    logging.info(f"GÜNCEL ADAY KPSS PUANI: {USER_PROFILE['kpss']}")
     logging.info("============================================================")
 
     sent_ids = load_sent_ids()
