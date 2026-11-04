@@ -17,7 +17,7 @@ logging.basicConfig(
     format="%(asctime)s - [%(levelname)s] - %(message)s"
 )
 
-# Aday Profil Tanımı (Güncellendi)
+# Aday Profil Tanımı
 USER_PROFILE = {
     "kpss": 80.86227,
     "ogrenim": "onlisans",
@@ -65,11 +65,18 @@ def save_sent_ids(sent_ids: Set[str]) -> None:
     except Exception as e:
         logging.error(f"sent_ids.json kaydetme hatası: {e}")
 
+def son_tarih_bul(metin: str) -> str:
+    """İlan metninden son başvuru tarihini arar."""
+    tarih_eslesmesi = re.search(r'(?:son başvuru|son tarih|tarihine kadar)\D*([0-9]{1,2}[\./][0-9]{1,2}[\./][0-9]{2,4})', metin, re.IGNORECASE)
+    if tarih_eslesmesi:
+        return tarih_eslesmesi.group(1)
+    return "Belirtilmemiş"
+
 def send_telegram_messages(green_items: List[str], yellow_items: List[str]) -> bool:
     """Telegram mesajlarını tüm Chat ID'lere HTML etiketlerini bölmeden akıllı paketler halinde gönderir."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     raw_chat_ids = os.getenv("TELEGRAM_CHAT_ID")
-    
+
     if not bot_token or not raw_chat_ids:
         logging.error("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID bulunamadı!")
         return False
@@ -189,7 +196,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
     baslik_filtreli = re.sub(r'\bmimar\s+sinan\b', '', baslik_tr)
     metin_tr = tr_lower(baslik + " " + detay_metni)
 
-    # 1. KPSS Kontrolü (Güncel Puanınız: 80.86227)
+    # 1. KPSS Kontrolü
     kpss_matches = re.findall(r'(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)', metin_tr)
     for match in kpss_matches:
         try:
@@ -225,14 +232,14 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str]:
         if not any(k in baslik_tr for k in ["büro", "adalet", "katip", "mübaşir", "güvenlik", "destek", "sözleşmeli", "4/b", "personel"]):
             return "🔴 BAŞVURAMAZSIN", "İlan unvanı Adalet / Önlisans nitelikleriyle uyuşmuyor."
 
-    # 5. Özel Nitelik Taraması (Adalet & 3001 Önlisans)
+    # 5. Özel Nitelik Taraması
     if any(k in metin_tr or k in baslik_tr for k in ["adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi", "infaz koruma"]):
         return "🟢 BAŞVURABİLİRSİN", "Özel niteliklerde 'Adalet' bölümü veya kadrosu tespit edildi."
 
     if any(k in metin_tr for k in ["3001", "herhangi bir önlisans", "önlisans programlarının birinden", "alan gözetmeksizin"]):
         return "🟢 BAŞVURABİLİRSİN", "Özel niteliklerde 'Herhangi bir Önlisans (3001)' şartı tespit edildi."
 
-    if any(k in metin_tr or k in baslik_tr for k in ["büro personeli", "veri hazırlama", "vhki", "bilgisayar işletmeni", "koruma ve güvenlik", "destek personeli"]):
+    if any(k in metin_tr for k in ["büro personeli", "veri hazırlama", "vhki", "bilgisayar işletmeni", "koruma ve güvenlik", "destek personeli"]):
         if any(e in metin_tr for e in ["önlisans", "ön lisans", "myo", "2 yıllık"]) or any(g in baslik_tr for g in ["4/b", "sözleşmeli", "personel alımı"]):
             return "🟢 BAŞVURABİLİRSİN", "Önlisans düzeyinde genel idari kadro tespit edildi."
 
@@ -249,7 +256,7 @@ def main() -> None:
 
     sent_ids = load_sent_ids()
     new_sent_ids = set(sent_ids)
-    
+
     ilanlar: List[Dict[str, str]] = []
 
     try:
@@ -289,23 +296,25 @@ def main() -> None:
         kaynak = ilan.get('source', 'Kamu Portalı')
 
         ilan_id = generate_id(link if link else baslik)
-        
+
         if ilan_id in sent_ids:
             continue
 
         detay = ilan_detay_getir(link) if link else ""
         durum, aciklama = ilan_analiz_et(baslik, detay)
+        son_tarih = son_tarih_bul(detay)
 
         logging.info(f"[{idx}/{len(ilanlar)}] ({kaynak}) {baslik} -> {durum}")
 
         clean_title = html.escape(baslik)
         clean_aciklama = html.escape(aciklama)
         clean_kaynak = html.escape(kaynak)
+        clean_son_tarih = html.escape(son_tarih)
 
         if link:
-            item_str = f"• [{clean_kaynak}] <a href='{link}'><b>{clean_title}</b></a>\n  📌 <i>{clean_aciklama}</i>"
+            item_str = f"• [{clean_kaynak}] <a href='{link}'><b>{clean_title}</b></a>\n  📌 <i>{clean_aciklama}</i>\n  ⏳ <b>Son Başvuru:</b> {clean_son_tarih}"
         else:
-            item_str = f"• [{clean_kaynak}] <b>{clean_title}</b>\n  📌 <i>{clean_aciklama}</i>"
+            item_str = f"• [{clean_kaynak}] <b>{clean_title}</b>\n  📌 <i>{clean_aciklama}</i>\n  ⏳ <b>Son Başvuru:</b> {clean_son_tarih}"
 
         if "🟢" in durum:
             yeni_green.append(item_str)
