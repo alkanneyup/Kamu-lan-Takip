@@ -6,6 +6,7 @@ import hashlib
 import logging
 import requests
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
 from urllib.parse import urljoin
 from typing import List, Dict, Tuple, Set
 from bs4 import BeautifulSoup
@@ -129,77 +130,134 @@ def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
         logging.error(f"SBB Kamu İlan portalından veri çekilirken hata oluştu: {e}")
     return ilanlar
 
+def resmi_gazete_ilanlari_getir() -> List[Dict[str, str]]:
+    """Resmi Gazete günlük ilanlarını tarar."""
+    ilanlar: List[Dict[str, str]] = []
+    base_url = "https://www.resmigazete.gov.tr/"
+    try:
+        res = requests.get(base_url, headers=HEADERS, timeout=12)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href']
+                title = a_tag.get_text(strip=True)
+                if title and len(title) > 10:
+                    title_lower = tr_lower(title)
+                    if any(k in title_lower for k in ["ilan", "personel", "alımı", "memur", "sözleşmeli"]):
+                        full_link = urljoin(base_url, href)
+                        ilanlar.append({
+                            'title': title,
+                            'link': full_link,
+                            'source': 'Resmi Gazete'
+                        })
+    except Exception as e:
+        logging.error(f"Resmi Gazete verileri çekilirken hata oluştu: {e}")
+    return ilanlar
+
+def osym_duyurulari_getir() -> List[Dict[str, str]]:
+    """ÖSYM tercih ve yerleştirme duyurularını tarar."""
+    ilanlar: List[Dict[str, str]] = []
+    base_url = "https://www.osym.gov.tr/"
+    try:
+        res = requests.get(base_url, headers=HEADERS, timeout=12)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href']
+                title = a_tag.get_text(strip=True)
+                if title and len(title) > 10:
+                    title_lower = tr_lower(title)
+                    if any(k in title_lower for k in ["kpss", "yerleştirme", "tercih", "ek tercih", "sağlık bakanlığı"]):
+                        full_link = urljoin(base_url, href)
+                        ilanlar.append({
+                            'title': title,
+                            'link': full_link,
+                            'source': 'ÖSYM Duyuruları'
+                        })
+    except Exception as e:
+        logging.error(f"ÖSYM duyuruları çekilirken hata oluştu: {e}")
+    return ilanlar
+
 def ilan_detay_getir(url: str) -> str:
     """İlan detay sayfasından metin çeker."""
     if not url:
         return ""
     try:
-        match = re.search(r'i=([a-f0-9-]+)', url, re.IGNORECASE)
-        if match:
-            guid = match.group(1)
-            api_url = f"https://kariyerkapisi.gov.tr/RSS/IlanDetayGetir?id={guid}"
-            res = requests.get(api_url, headers=HEADERS, timeout=10)
-            if res.status_code == 200:
-                try:
-                    data = res.json()
-                    metin = data.get('Metin', '') or data.get('Açıklama', '') or str(data)
-                    if metin and len(metin) > 50:
-                        clean_text = re.sub(r'<[^>]+>', ' ', metin)
-                        return " ".join(html.unescape(clean_text).split())
-                except Exception:
-                    pass
+        if "kariyerkapisi.gov.tr" in url:
+            match = re.search(r'i=([a-f0-9-]+)', url, re.IGNORECASE)
+            if match:
+                guid = match.group(1)
+                api_url = f"https://kariyerkapisi.gov.tr/RSS/IlanDetayGetir?id={guid}"
+                res = requests.get(api_url, headers=HEADERS, timeout=10)
+                if res.status_code == 200:
+                    try:
+                        data = res.json()
+                        metin = data.get('Metin', '') or data.get('Açıklama', '') or str(data)
+                        if metin and len(metin) > 50:
+                            clean_text = re.sub(r'<[^>]+>', ' ', metin)
+                            return " ".join(html.unescape(clean_text).split())
+                    except Exception:
+                        pass
 
         res = requests.get(url, headers=HEADERS, timeout=10)
         if res.status_code == 200:
             clean_text = re.sub(r'<script.*?>.*?</script>', '', res.text, flags=re.DOTALL | re.IGNORECASE)
-            clean_text = re.sub(r'<style.*?>.*?</style>', '', res.text, flags=re.DOTALL | re.IGNORECASE)
+            clean_text = re.sub(r'<style.*?>.*?</style>', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
             clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
             return " ".join(html.unescape(clean_text).split())
     except Exception as e:
         logging.debug(f"İlan detayı çekilemedi ({url}): {e}")
     return ""
 
+def son_basvuru_tarihi_bul(metin: str) -> str:
+    """Metin içerisindeki son başvuru tarihini regex ile yakalar."""
+    tarih_ kaliplari = re.findall(r'(?:son başvuru|son gün|tarihine kadar)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})', metin, re.IGNORECASE)
+    if tarih_kaliplari:
+        return f"⏰ Son Başvuru: {tarih_kaliplari[0]}"
+    return "⏰ Son Başvuru: Detayda Belirtilmiş"
+
 def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[bool, str, str]:
-    """
-    Sadece ve sadece detay metninde veya unvanda net olarak Adalet/Önlisans/Hemşirelik 
-    şartı geçen ilanları kabul eder. Genel/boş ilanları kesinlikle reddeder.
-    """
+    """Kesin eşleşme sağlayan Whitelist analizi."""
     baslik_tr = tr_lower(baslik)
     metin_tr = tr_lower(baslik + " " + detay_metni)
 
-    # 1. Hemşirelik Kontrolü
+    # ÖSYM veya Merkezi yerleştirmeler doğrudan kabul edilir
+    if "öSYM" in baslik or "kpss" in baslik_tr and ("tercih" in baslik_tr or "yerleştirme" in baslik_tr):
+        return True, "ÖSYM merkezi yerleştirme / tercih duyurusu.", "Merkezi Tercih"
+
+    # Hemşirelik Kontrolü
     if "hemşire" in baslik_tr or "hemşire" in metin_tr:
         if "lisans" in metin_tr or "fakülte" in metin_tr or "sağlık bilimleri" in metin_tr:
-            return True, "Lisans Hemşirelik kadrosu tespit edildi.", "Hemşirelik (Lisans)"
+            deadline = son_basvuru_tarihi_bul(detay_metni)
+            return True, f"Lisans Hemşirelik kadrosu tespit edildi. {deadline}", "Hemşirelik (Lisans)"
 
-    # 2. Adalet / Önlisans / 3001 Kontrolü (Metinde kesinlikle geçmek zorunda)
+    # Adalet / Önlisans / 3001 Kontrolü
     adalet_zorunlu_kelimeler = [
         "adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi", 
         "infaz koruma", "3001", "önlisans programlarının", "ön lisans programlarının",
         "adalet meslek yüksekokulu", "adalet programı"
     ]
     
-    # Genel idari kadrolar için ek güvence (Önlisans ve Büro/Koruma birlikte geçmeli)
     buro_ve_onlisans = ("büro personeli" in metin_tr or "koruma ve güvenlik" in metin_tr or "destek personeli" in metin_tr) and ("önlisans" in metin_tr or "ön lisans" in metin_tr or "myo" in metin_tr)
 
     if any(k in metin_tr for k in adalet_zorunlu_kelimeler) or buro_ve_onlisans:
-        # KPSS Taban Puan Kontrolü
         kpss_matches = re.findall(r'(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)', metin_tr)
         for match in kpss_matches:
             try:
                 req_score = float(match.replace(',', '.'))
                 if 50.0 <= req_score <= 100.0:
                     if USER_PROFILE["kpss"] < req_score:
-                        return False, "", "" # Puan yetmiyorsa ele
+                        return False, "", ""
             except ValueError:
                 continue
-        return True, "İlan detayında Adalet / Önlisans / İlgili şartlar doğrulandı.", "Adalet (Önlisans)"
+        deadline = son_basvuru_tarihi_bul(detay_metni)
+        return True, f"Adalet / Önlisans şartları sağlandı. {deadline}", "Adalet (Önlisans)"
 
     return False, "", ""
 
 def main() -> None:
     logging.info("============================================================")
-    logging.info("KAMU İLAN TAKİP VE FİLTRELEME OTOMASYONU (Kesin Detay Doğrulamalı)")
+    logging.info("KAMU İLAN TAKİP (ÖSYM + Resmi Gazete + SBB + İŞKUR + Deadline)")
     logging.info("============================================================")
 
     sent_ids = load_sent_ids()
@@ -207,6 +265,7 @@ def main() -> None:
     
     ilanlar: List[Dict[str, str]] = []
 
+    # 1. Kariyer Kapısı
     try:
         res = requests.get("https://kariyerkapisi.gov.tr/RSS", headers=HEADERS, timeout=12)
         if res.status_code == 200:
@@ -217,21 +276,39 @@ def main() -> None:
                 if title:
                     ilanlar.append({'title': title.strip(), 'link': link.strip(), 'source': 'Kariyer Kapısı'})
     except Exception as e:
-        logging.error(f"Kariyer Kapısı RSS işleme hatası: {e}")
+        logging.error(f"Kariyer Kapısı hata: {e}")
 
+    # 2. SBB Kamu İlan
     try:
         sbb_ilanlari = sbb_kamu_ilan_getir()
         if sbb_ilanlari:
             ilanlar.extend(sbb_ilanlari)
     except Exception as e:
-        logging.error(f"SBB Kamu İlan verileri alınırken hata oluştu: {e}")
+        logging.error(f"SBB hata: {e}")
 
+    # 3. İŞKUR
     try:
         iskur_ilanlari = iskur_ilanlarini_getir()
         if iskur_ilanlari:
             ilanlar.extend(iskur_ilanlari)
     except Exception as e:
-        logging.error(f"İŞKUR verileri alınırken hata oluştu: {e}")
+        logging.error(f"İŞKUR hata: {e}")
+
+    # 4. Resmi Gazete
+    try:
+        rg_ilanlari = resmi_gazete_ilanlari_getir()
+        if rg_ilanlari:
+            ilanlar.extend(rg_ilanlari)
+    except Exception as e:
+        logging.error(f"Resmi Gazete hata: {e}")
+
+    # 5. ÖSYM Duyuruları (YENİ EKLENDİ)
+    try:
+        osym_ilanlari = osym_duyurulari_getir()
+        if osym_ilanlari:
+            ilanlar.extend(osym_ilanlari)
+    except Exception as e:
+        logging.error(f"ÖSYM hata: {e}")
 
     logging.info(f"Toplam Taranacak İlan Sayısı: {len(ilanlar)}")
 
@@ -247,7 +324,6 @@ def main() -> None:
         if ilan_id in sent_ids:
             continue
 
-        # ÖNEMLİ: Artık her ilanın detay metni mutlaka çekiliyor ve inceleniyor!
         detay = ilan_detay_getir(link) if link else ""
         uygun_mu, aciklama, hedef_profil = ilan_analiz_et(baslik, detay)
 
