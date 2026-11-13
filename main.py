@@ -17,25 +17,10 @@ logging.basicConfig(
     format="%(asctime)s - [%(levelname)s] - %(message)s"
 )
 
-# Çoklu Aday Profilleri (Adalet & Lisans Hemşirelik)
-PROFILES = [
-    {
-        "name": "Adalet (Önlisans)",
-        "kpss": 80.86227,
-        "ogrenim": "onlisans",
-        "bolum": "adalet",
-        "cinsiyet": "erkek",
-        "yas": 29
-    },
-    {
-        "name": "Hemşirelik (Lisans)",
-        "kpss": 70.0,  # Hemşirelik için alt taban puan (ihtiyaca göre güncelleyebilirsiniz)
-        "ogrenim": "lisans",
-        "bolum": "hemşirelik",
-        "cinsiyet": "farketmez",
-        "yas": 29
-    }
-]
+USER_PROFILE = {
+    "kpss": 80.86227,
+    "yas": 29
+}
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -76,7 +61,7 @@ def save_sent_ids(sent_ids: Set[str]) -> None:
     except Exception as e:
         logging.error(f"sent_ids.json kaydetme hatası: {e}")
 
-def send_telegram_messages(green_items: List[str], yellow_items: List[str]) -> bool:
+def send_telegram_messages(green_items: List[str]) -> bool:
     """Telegram mesajlarını tüm Chat ID'lere HTML etiketlerini bölmeden akıllı paketler halinde gönderir."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     raw_chat_ids = os.getenv("TELEGRAM_CHAT_ID")
@@ -89,25 +74,14 @@ def send_telegram_messages(green_items: List[str], yellow_items: List[str]) -> b
 
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     messages: List[str] = []
-    current_msg = "📢 <b>YENİ KAMU İLANLARI TESPİT EDİLDİ</b>\n\n"
+    current_msg = "📢 <b>YENİ UYGUN KAMU İLANLARI TESPİT EDİLDİ</b>\n\n"
 
     if green_items:
-        current_msg += "🟢 <b>UYGUN İLANLAR (Adalet & Hemşirelik):</b>\n"
+        current_msg += "🟢 <b>SİZE UYGUN İLANLAR:</b>\n"
         for item in green_items:
             if len(current_msg) + len(item) + 4 > 3500:
                 messages.append(current_msg)
-                current_msg = "🟢 <b>UYGUN İLANLAR (Devam):</b>\n"
-            current_msg += item + "\n\n"
-
-    if yellow_items:
-        if len(current_msg) + 60 > 3500:
-            messages.append(current_msg)
-            current_msg = ""
-        current_msg += "🟡 <b>KONTROL ETMENİZ GEREKEN İLANLAR:</b>\n"
-        for item in yellow_items:
-            if len(current_msg) + len(item) + 4 > 3500:
-                messages.append(current_msg)
-                current_msg = "🟡 <b>KONTROL ETMENİZ GEREKEN İLANLAR (Devam):</b>\n"
+                current_msg = "🟢 <b>SİZE UYGUN İLANLAR (Devam):</b>\n"
             current_msg += item + "\n\n"
 
     if current_msg.strip():
@@ -145,19 +119,12 @@ def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
                 href = a_tag['href']
                 title = a_tag.get_text(strip=True)
                 if title and len(title) > 10:
-                    title_lower = tr_lower(title)
-                    anahtar_kelimeler = [
-                        "alacak", "alımı", "personel", "memur", "sözleşmeli", 
-                        "bakanlığı", "belediyesi", "başkanlığı", "üniversitesi", 
-                        "genel müdürlüğü", "icra", "katip", "mübaşir", "adalet", "büro", "hemşire"
-                    ]
-                    if any(k in title_lower for k in anahtar_kelimeler):
-                        full_link = urljoin(base_url, href)
-                        ilanlar.append({
-                            'title': title,
-                            'link': full_link,
-                            'source': 'SBB Kamu İlan'
-                        })
+                    full_link = urljoin(base_url, href)
+                    ilanlar.append({
+                        'title': title,
+                        'link': full_link,
+                        'source': 'SBB Kamu İlan'
+                    })
     except Exception as e:
         logging.error(f"SBB Kamu İlan portalından veri çekilirken hata oluştu: {e}")
     return ilanlar
@@ -185,53 +152,54 @@ def ilan_detay_getir(url: str) -> str:
         res = requests.get(url, headers=HEADERS, timeout=10)
         if res.status_code == 200:
             clean_text = re.sub(r'<script.*?>.*?</script>', '', res.text, flags=re.DOTALL | re.IGNORECASE)
-            clean_text = re.sub(r'<style.*?>.*?</style>', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
+            clean_text = re.sub(r'<style.*?>.*?</style>', '', res.text, flags=re.DOTALL | re.IGNORECASE)
             clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
             return " ".join(html.unescape(clean_text).split())
     except Exception as e:
         logging.debug(f"İlan detayı çekilemedi ({url}): {e}")
     return ""
 
-def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[str, str, str]:
-    """Her iki profile göre (Adalet & Hemşirelik) ayrı ayrı analiz yapar."""
+def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[bool, str, str]:
+    """
+    Sadece ve sadece detay metninde veya unvanda net olarak Adalet/Önlisans/Hemşirelik 
+    şartı geçen ilanları kabul eder. Genel/boş ilanları kesinlikle reddeder.
+    """
     baslik_tr = tr_lower(baslik)
-    baslik_filtreli = re.sub(r'\bmimar\s+sinan\b', '', baslik_tr)
     metin_tr = tr_lower(baslik + " " + detay_metni)
 
-    # Önce Hemşirelik kontrolü
+    # 1. Hemşirelik Kontrolü
     if "hemşire" in baslik_tr or "hemşire" in metin_tr:
-        if any(l in metin_tr for l in ["lisans", "fakülte", "sağlık bilimleri fakültesi", "hemşirelik bölümü"]):
-            return "🟢 BAŞVURABİLİRSİN", "Lisans Hemşirelik kadrosu tespit edildi.", "Hemşirelik (Lisans)"
+        if "lisans" in metin_tr or "fakülte" in metin_tr or "sağlık bilimleri" in metin_tr:
+            return True, "Lisans Hemşirelik kadrosu tespit edildi.", "Hemşirelik (Lisans)"
 
-    # Adalet / Önlisans kontrolü
-    kpss_matches = re.findall(r'(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)', metin_tr)
-    for match in kpss_matches:
-        try:
-            req_score = float(match.replace(',', '.'))
-            if 50.0 <= req_score <= 100.0:
-                if PROFILES[0]["kpss"] < req_score:
-                    return "🔴 BAŞVURAMAZSIN", f"Adalet için KPSS puanınız ({PROFILES[0]['kpss']}) taban puanın ({req_score}) altında.", "Adalet (Önlisans)"
-        except ValueError:
-            continue
+    # 2. Adalet / Önlisans / 3001 Kontrolü (Metinde kesinlikle geçmek zorunda)
+    adalet_zorunlu_kelimeler = [
+        "adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi", 
+        "infaz koruma", "3001", "önlisans programlarının", "ön lisans programlarının",
+        "adalet meslek yüksekokulu", "adalet programı"
+    ]
+    
+    # Genel idari kadrolar için ek güvence (Önlisans ve Büro/Koruma birlikte geçmeli)
+    buro_ve_onlisans = ("büro personeli" in metin_tr or "koruma ve güvenlik" in metin_tr or "destek personeli" in metin_tr) and ("önlisans" in metin_tr or "ön lisans" in metin_tr or "myo" in metin_tr)
 
-    if any(k in metin_tr or k in baslik_tr for k in ["adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi", "infaz koruma"]):
-        return "🟢 BAŞVURABİLİRSİN", "Özel niteliklerde 'Adalet' bölümü veya kadrosu tespit edildi.", "Adalet (Önlisans)"
+    if any(k in metin_tr for k in adalet_zorunlu_kelimeler) or buro_ve_onlisans:
+        # KPSS Taban Puan Kontrolü
+        kpss_matches = re.findall(r'(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)', metin_tr)
+        for match in kpss_matches:
+            try:
+                req_score = float(match.replace(',', '.'))
+                if 50.0 <= req_score <= 100.0:
+                    if USER_PROFILE["kpss"] < req_score:
+                        return False, "", "" # Puan yetmiyorsa ele
+            except ValueError:
+                continue
+        return True, "İlan detayında Adalet / Önlisans / İlgili şartlar doğrulandı.", "Adalet (Önlisans)"
 
-    if any(k in metin_tr for k in ["3001", "herhangi bir önlisans", "önlisans programlarının birinden"]):
-        return "🟢 BAŞVURABİLİRSİN", "Özel niteliklerde 'Herhangi bir Önlisans (3001)' şartı tespit edildi.", "Adalet (Önlisans)"
-
-    if any(k in metin_tr or k in baslik_tr for k in ["büro personeli", "veri hazırlama", "vhki", "koruma ve güvenlik", "destek personeli"]):
-        if any(e in metin_tr for e in ["önlisans", "ön lisans", "myo", "2 yıllık"]) or any(g in baslik_tr for g in ["4/b", "sözleşmeli"]):
-            return "🟢 BAŞVURABİLİRSİN", "Önlisans düzeyinde genel idari kadro tespit edildi.", "Adalet (Önlisans)"
-
-    if any(g in baslik_tr for g in ["4/b", "sözleşmeli personel", "personel alım"]):
-        return "🟢 BAŞVURABİLİRSİN", "Toplu 4/B sözleşmeli personel alımı.", "Genel / Diğer"
-
-    return "🟡 KONTROL GEREKİYOR", "Özel niteliklerin detaylı incelenmesi önerilir.", "Genel"
+    return False, "", ""
 
 def main() -> None:
     logging.info("============================================================")
-    logging.info("KAMU İLAN TAKİP VE FİLTRELEME OTOMASYONU (Çoklu Profil)")
+    logging.info("KAMU İLAN TAKİP VE FİLTRELEME OTOMASYONU (Kesin Detay Doğrulamalı)")
     logging.info("============================================================")
 
     sent_ids = load_sent_ids()
@@ -268,7 +236,6 @@ def main() -> None:
     logging.info(f"Toplam Taranacak İlan Sayısı: {len(ilanlar)}")
 
     yeni_green: List[str] = []
-    yeni_yellow: List[str] = []
 
     for idx, ilan in enumerate(ilanlar, 1):
         baslik = ilan.get('title', '')
@@ -280,10 +247,14 @@ def main() -> None:
         if ilan_id in sent_ids:
             continue
 
+        # ÖNEMLİ: Artık her ilanın detay metni mutlaka çekiliyor ve inceleniyor!
         detay = ilan_detay_getir(link) if link else ""
-        durum, aciklama, hedef_profil = ilan_analiz_et(baslik, detay)
+        uygun_mu, aciklama, hedef_profil = ilan_analiz_et(baslik, detay)
 
-        logging.info(f"[{idx}/{len(ilanlar)}] ({kaynak}) [{hedef_profil}] {baslik} -> {durum}")
+        if not uygun_mu:
+            continue
+
+        logging.info(f"[{idx}/{len(ilanlar)}] ({kaynak}) [{hedef_profil}] UYGUN İLAN -> {baslik}")
 
         clean_title = html.escape(baslik)
         clean_aciklama = html.escape(aciklama)
@@ -295,23 +266,18 @@ def main() -> None:
         else:
             item_str = f"• [{clean_kaynak}] 🎯 <b>[{clean_profil}]</b>\n  <b>{clean_title}</b>\n  📌 <i>{clean_aciklama}</i>"
 
-        if "🟢" in durum:
-            yeni_green.append(item_str)
-            new_sent_ids.add(ilan_id)
-        elif "🟡" in durum:
-            yeni_yellow.append(item_str)
-            new_sent_ids.add(ilan_id)
+        yeni_green.append(item_str)
+        new_sent_ids.add(ilan_id)
 
-    # Telegram Bildirim Yönetimi
-    if yeni_green or yeni_yellow:
-        sent_success = send_telegram_messages(yeni_green, yeni_yellow)
+    if yeni_green:
+        sent_success = send_telegram_messages(yeni_green)
         if sent_success:
             save_sent_ids(new_sent_ids)
-            logging.info("Tüm ilanlar başarıyla bildirildi ve sent_ids.json güncellendi.")
+            logging.info("Uygun ilanlar Telegram üzerinden bildirildi.")
         else:
             logging.error("Telegram bildirimi sırasında hata oluştu.")
     else:
-        logging.info("Kriterlere uygun yeni bildirilecek ilan bulunamadı.")
+        logging.info("Kriterlerinize tam uyan yeni bir ilan bulunamadı.")
 
 if __name__ == "__main__":
     main()
