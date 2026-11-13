@@ -211,7 +211,7 @@ def ilan_detay_getir(url: str) -> str:
 
 def son_basvuru_tarihi_bul(metin: str) -> str:
     """Metin içerisindeki son başvuru tarihini regex ile yakalar."""
-    tarih_ kaliplari = re.findall(r'(?:son başvuru|son gün|tarihine kadar)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})', metin, re.IGNORECASE)
+    tarih_kaliplari = re.findall(r'(?:son başvuru|son gün|tarihine kadar)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})', metin, re.IGNORECASE)
     if tarih_kaliplari:
         return f"⏰ Son Başvuru: {tarih_kaliplari[0]}"
     return "⏰ Son Başvuru: Detayda Belirtilmiş"
@@ -221,17 +221,14 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[bool, str, str]:
     baslik_tr = tr_lower(baslik)
     metin_tr = tr_lower(baslik + " " + detay_metni)
 
-    # ÖSYM veya Merkezi yerleştirmeler doğrudan kabul edilir
     if "öSYM" in baslik or "kpss" in baslik_tr and ("tercih" in baslik_tr or "yerleştirme" in baslik_tr):
         return True, "ÖSYM merkezi yerleştirme / tercih duyurusu.", "Merkezi Tercih"
 
-    # Hemşirelik Kontrolü
     if "hemşire" in baslik_tr or "hemşire" in metin_tr:
         if "lisans" in metin_tr or "fakülte" in metin_tr or "sağlık bilimleri" in metin_tr:
             deadline = son_basvuru_tarihi_bul(detay_metni)
             return True, f"Lisans Hemşirelik kadrosu tespit edildi. {deadline}", "Hemşirelik (Lisans)"
 
-    # Adalet / Önlisans / 3001 Kontrolü
     adalet_zorunlu_kelimeler = [
         "adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi", 
         "infaz koruma", "3001", "önlisans programlarının", "ön lisans programlarının",
@@ -265,7 +262,6 @@ def main() -> None:
     
     ilanlar: List[Dict[str, str]] = []
 
-    # 1. Kariyer Kapısı
     try:
         res = requests.get("https://kariyerkapisi.gov.tr/RSS", headers=HEADERS, timeout=12)
         if res.status_code == 200:
@@ -278,7 +274,6 @@ def main() -> None:
     except Exception as e:
         logging.error(f"Kariyer Kapısı hata: {e}")
 
-    # 2. SBB Kamu İlan
     try:
         sbb_ilanlari = sbb_kamu_ilan_getir()
         if sbb_ilanlari:
@@ -286,7 +281,6 @@ def main() -> None:
     except Exception as e:
         logging.error(f"SBB hata: {e}")
 
-    # 3. İŞKUR
     try:
         iskur_ilanlari = iskur_ilanlarini_getir()
         if iskur_ilanlari:
@@ -294,7 +288,6 @@ def main() -> None:
     except Exception as e:
         logging.error(f"İŞKUR hata: {e}")
 
-    # 4. Resmi Gazete
     try:
         rg_ilanlari = resmi_gazete_ilanlari_getir()
         if rg_ilanlari:
@@ -302,7 +295,6 @@ def main() -> None:
     except Exception as e:
         logging.error(f"Resmi Gazete hata: {e}")
 
-    # 5. ÖSYM Duyuruları (YENİ EKLENDİ)
     try:
         osym_ilanlari = osym_duyurulari_getir()
         if osym_ilanlari:
