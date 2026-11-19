@@ -27,7 +27,6 @@ HEADERS = {
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
-# Takip Edilecek 20 Resmi ve Haber/İlan Kaynağı
 SOURCES: List[Dict[str, str]] = [
     {"name": "Resmi Gazete", "url": "https://www.resmigazete.gov.tr"},
     {"name": "Kariyer Kapısı (CBİKO)", "url": "https://isealimkariyerkapisi.cbiko.gov.tr"},
@@ -49,6 +48,17 @@ SOURCES: List[Dict[str, str]] = [
     {"name": "İşinOlsa", "url": "https://www.isinolsa.com"},
     {"name": "KamuAjans", "url": "https://www.kamuajans.com"},
     {"name": "MyMemur", "url": "https://www.mymemur.com.tr"},
+]
+
+ILAN_IFADELERI = [
+    "alımı", "alım ilanı", "alacak", "alacaktır", "personel alım",
+    "memur alım", "sözleşmeli alım", "başvuru ilanı", "işçi alım", "temini"
+]
+
+DUYURU_HARIC_IFADELER = [
+    "kura", "mülakat", "sınav sonucu", "sonuçları", "tebligat",
+    "takvim", "yerleştirme sonuç", "ek yerleştirme sonuç", "nihai liste",
+    "asıl ve yedek", "komisyon", "dilekçe", "ücret tarifesi", "mevzuat"
 ]
 
 def tr_lower(metin: str) -> str:
@@ -129,16 +139,18 @@ def send_telegram_messages(green_items: List[str]) -> bool:
 
     return all_success
 
+def ilan_basligi_mi(baslik_tr: str) -> bool:
+    """Başlığın bir duyuru/sonuç/haber değil, doğrudan ilan niteliğinde olup olmadığını kontrol eder."""
+    if len(baslik_tr) < 12 or len(baslik_tr) > 180:
+        return False
+    if any(k in baslik_tr for k in DUYURU_HARIC_IFADELER):
+        return False
+    return any(k in baslik_tr for k in ILAN_IFADELERI)
+
 def kaynak_ilanlari_getir(kaynak_adi: str, base_url: str) -> List[Dict[str, str]]:
-    """Verilen URL'deki bağlantıları tarayarak potansiyel ilan/duyuru kayıtlarını döndürür."""
+    """Verilen URL'deki bağlantılardan yalnızca ilan niteliğindeki kayıtları toplar."""
     ilanlar: List[Dict[str, str]] = []
     seen_links: Set[str] = set()
-
-    on_filtre_kelimeler = [
-        "ilan", "personel", "alımı", "alacak", "memur", "sözleşmeli",
-        "kpss", "tercih", "yerleştirme", "katip", "mübaşir", "infaz",
-        "koruma", "güvenlik", "büro", "hemşire", "önlisans", "3001", "duyuru"
-    ]
 
     try:
         res = requests.get(base_url, headers=HEADERS, timeout=10, allow_redirects=True)
@@ -153,24 +165,24 @@ def kaynak_ilanlari_getir(kaynak_adi: str, base_url: str) -> List[Dict[str, str]
 
             if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
                 continue
-            if not title or len(title) < 12 or len(title) > 260:
-                continue
 
             title_tr = tr_lower(title)
-            if any(k in title_tr for k in on_filtre_kelimeler):
-                full_link = urljoin(res.url, href)
-                parsed = urlparse(full_link)
-                if parsed.scheme not in ("http", "https"):
-                    continue
-                if full_link in seen_links:
-                    continue
-                seen_links.add(full_link)
+            if not ilan_basligi_mi(title_tr):
+                continue
 
-                ilanlar.append({
-                    "title": title,
-                    "link": full_link,
-                    "source": kaynak_adi
-                })
+            full_link = urljoin(res.url, href)
+            parsed = urlparse(full_link)
+            if parsed.scheme not in ("http", "https"):
+                continue
+            if full_link in seen_links:
+                continue
+            seen_links.add(full_link)
+
+            ilanlar.append({
+                "title": title,
+                "link": full_link,
+                "source": kaynak_adi
+            })
     except Exception as e:
         logging.error(f"[{kaynak_adi}] veri çekilirken hata oluştu ({base_url}): {e}")
 
@@ -219,22 +231,22 @@ def son_basvuru_tarihi_bul(metin: str) -> str:
     return "⏰ Son Başvuru: Detayda Belirtilmiş"
 
 def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[bool, str, str]:
-    """Kesin eşleşme sağlayan Whitelist analizi yapar."""
+    """Yalnızca gerçek alım ilanlarını ve profilinize uyan kadroları kabul eder."""
     baslik_tr = tr_lower(baslik)
     metin_tr = tr_lower(baslik + " " + detay_metni)
 
-    # ÖSYM / KPSS Yerleştirme veya Tercih Duyuruları
-    if ("ösym" in baslik_tr or "kpss" in baslik_tr) and ("tercih" in baslik_tr or "yerleştirme" in baslik_tr):
+    if not ilan_basligi_mi(baslik_tr) and not any(k in metin_tr for k in ILAN_IFADELERI):
+        return False, "", ""
+
+    if any(k in baslik_tr for k in DUYURU_HARIC_IFADELER):
+        return False, "", ""
+
+    # Lisans Hemşirelik Alım İlanı
+    if "hemşire" in metin_tr and any(k in metin_tr for k in ["lisans", "fakülte", "sağlık bilimleri", "hemşirelik"]):
         deadline = son_basvuru_tarihi_bul(detay_metni)
-        return True, f"ÖSYM merkezi yerleştirme / tercih duyurusu. {deadline}", "Merkezi Tercih"
+        return True, f"Lisans Hemşirelik alım ilanı doğrulandı. {deadline}", "Hemşirelik (Lisans)"
 
-    # Lisans Hemşirelik Kontrolü
-    if "hemşire" in baslik_tr or "hemşire" in metin_tr:
-        if any(k in metin_tr for k in ["lisans", "fakülte", "sağlık bilimleri", "hemşirelik"]):
-            deadline = son_basvuru_tarihi_bul(detay_metni)
-            return True, f"Lisans Hemşirelik kadrosu tespit edildi. {deadline}", "Hemşirelik (Lisans)"
-
-    # Adalet / Önlisans / 3001 / İlgili Kadro Kontrolü
+    # Adalet / Önlisans / 3001 / İlgili Kadro Alım İlanı
     adalet_zorunlu_kelimeler = [
         "adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi",
         "infaz koruma", "3001", "önlisans programlarının", "ön lisans programlarının",
@@ -257,31 +269,29 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[bool, str, str]:
             except ValueError:
                 continue
         deadline = son_basvuru_tarihi_bul(detay_metni)
-        return True, f"Adalet / Önlisans şartları sağlandı. {deadline}", "Adalet (Önlisans)"
+        return True, f"Adalet / Önlisans alım ilanı doğrulandı. {deadline}", "Adalet (Önlisans)"
 
     return False, "", ""
 
 def main() -> None:
     logging.info("============================================================")
-    logging.info("KAMU İLAN TAKİP (20 Kaynak + İŞKUR + Deadline + Whitelist)")
+    logging.info("KAMU İLAN TAKİP (Yalnızca Alım İlanları Modu)")
     logging.info("============================================================")
 
     sent_ids = load_sent_ids()
     new_sent_ids = set(sent_ids)
     ilanlar: List[Dict[str, str]] = []
 
-    # 1. Tanımlı 20 Kaynağın Tümü
     for src in SOURCES:
         kaynak_adi = src["name"]
         kaynak_url = src["url"]
         try:
             bulunanlar = kaynak_ilanlari_getir(kaynak_adi, kaynak_url)
-            logging.info(f"[{kaynak_adi}] -> {len(bulunanlar)} aday bağlantı bulundu.")
+            logging.info(f"[{kaynak_adi}] -> {len(bulunanlar)} ilan başlığı bulundu.")
             ilanlar.extend(bulunanlar)
         except Exception as e:
             logging.error(f"[{kaynak_adi}] genel tarama hatası: {e}")
 
-    # 2. İŞKUR Modülü
     try:
         iskur_ilanlari = iskur_ilanlarini_getir()
         if iskur_ilanlari:
@@ -290,7 +300,6 @@ def main() -> None:
     except Exception as e:
         logging.error(f"İŞKUR modülü hata: {e}")
 
-    # Aynı URL'den gelen tekrarları ayıkla
     tekil_ilanlar: List[Dict[str, str]] = []
     gorulen_idler: Set[str] = set()
     for ilan in ilanlar:
