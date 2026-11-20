@@ -5,12 +5,12 @@ import html
 import hashlib
 import logging
 import requests
+from datetime import datetime, date
 from urllib.parse import urljoin, urlparse
-from typing import List, Dict, Tuple, Set
+from typing import List, Dict, Tuple, Set, Optional
 from bs4 import BeautifulSoup
 from iskur import iskur_ilanlarini_getir
 
-# Loglama Yapılandırması
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - [%(levelname)s] - %(message)s"
@@ -27,6 +27,7 @@ HEADERS = {
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
+# Haber/özet siteleri çıkarıldı; yalnızca resmi ve doğrudan ilan/kurum kaynakları bırakıldı
 SOURCES: List[Dict[str, str]] = [
     {"name": "Resmi Gazete", "url": "https://www.resmigazete.gov.tr"},
     {"name": "Kariyer Kapısı (CBİKO)", "url": "https://isealimkariyerkapisi.cbiko.gov.tr"},
@@ -44,25 +45,22 @@ SOURCES: List[Dict[str, str]] = [
     {"name": "YÖK İlan", "url": "https://ilan.yok.gov.tr"},
     {"name": "Türkiye Belediyeler Birliği", "url": "https://www.tbb.gov.tr"},
     {"name": "Memurlar.net İlan", "url": "https://ilan.memurlar.net"},
-    {"name": "KamuPersoneli.net", "url": "https://www.kamupersoneli.net"},
-    {"name": "İşinOlsa", "url": "https://www.isinolsa.com"},
-    {"name": "KamuAjans", "url": "https://www.kamuajans.com"},
-    {"name": "MyMemur", "url": "https://www.mymemur.com.tr"},
+]
+
+HABER_VE_KALABALIK_IFADELERI = [
+    "maaşlar ne kadar", "taban puanlar", "bu hafta", "ilan yayımlandı",
+    "şartları açıklandı", "kontenjanlar ve başvuru şartları", "bölüm şartı yok",
+    "sınav yapılmayacak", "mühendis ve tekniker", "hizmetli, şoför",
+    "kura", "mülakat", "sınav sonucu", "sonuçları", "tebligat",
+    "takvim", "yerleştirme sonuç", "nihai liste", "asıl ve yedek"
 ]
 
 ILAN_IFADELERI = [
     "alımı", "alım ilanı", "alacak", "alacaktır", "personel alım",
-    "memur alım", "sözleşmeli alım", "başvuru ilanı", "işçi alım", "temini"
-]
-
-DUYURU_HARIC_IFADELER = [
-    "kura", "mülakat", "sınav sonucu", "sonuçları", "tebligat",
-    "takvim", "yerleştirme sonuç", "ek yerleştirme sonuç", "nihai liste",
-    "asıl ve yedek", "komisyon", "dilekçe", "ücret tarifesi", "mevzuat"
+    "memur alım", "sözleşmeli alım", "başvuru ilanı", "temini"
 ]
 
 def tr_lower(metin: str) -> str:
-    """Türkçe karakter desteği sağlanan küçük harfe dönüştürme fonksiyonu."""
     if not metin:
         return ""
     donusum = {"İ": "i", "I": "ı", "Ş": "ş", "Ğ": "ğ", "Ü": "ü", "Ö": "ö", "Ç": "ç"}
@@ -71,11 +69,9 @@ def tr_lower(metin: str) -> str:
     return metin.lower()
 
 def generate_id(metin: str) -> str:
-    """Benzersiz ilan kimliği oluşturur."""
     return hashlib.md5(metin.encode('utf-8')).hexdigest()
 
 def load_sent_ids() -> Set[str]:
-    """Daha önce bildirilen ilan kimliklerini yükler."""
     if os.path.exists("sent_ids.json"):
         try:
             with open("sent_ids.json", "r", encoding="utf-8") as f:
@@ -87,7 +83,6 @@ def load_sent_ids() -> Set[str]:
     return set()
 
 def save_sent_ids(sent_ids: Set[str]) -> None:
-    """Bildirilen ilan kimliklerini kaydeder."""
     try:
         with open("sent_ids.json", "w", encoding="utf-8") as f:
             json.dump(list(sent_ids), f, ensure_ascii=False, indent=2)
@@ -95,7 +90,6 @@ def save_sent_ids(sent_ids: Set[str]) -> None:
         logging.error(f"sent_ids.json kaydetme hatası: {e}")
 
 def send_telegram_messages(green_items: List[str]) -> bool:
-    """Telegram mesajlarını tüm Chat ID'lere HTML etiketlerini bölmeden akıllı paketler halinde gönderir."""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     raw_chat_ids = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -106,14 +100,14 @@ def send_telegram_messages(green_items: List[str]) -> bool:
     chat_ids = [cid.strip() for cid in raw_chat_ids.split(",") if cid.strip()]
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     messages: List[str] = []
-    current_msg = "📢 <b>YENİ UYGUN KAMU İLANLARI TESPİT EDİLDİ</b>\n\n"
+    current_msg = "📢 <b>YENİ VE AKTİF KAMU İLANLARI</b>\n\n"
 
     if green_items:
-        current_msg += "🟢 <b>SİZE UYGUN İLANLAR:</b>\n"
+        current_msg += "🟢 <b>SİZE UYGUN AKTİF İLANLAR:</b>\n"
         for item in green_items:
             if len(current_msg) + len(item) + 4 > 3500:
                 messages.append(current_msg)
-                current_msg = "🟢 <b>SİZE UYGUN İLANLAR (Devam):</b>\n"
+                current_msg = "🟢 <b>SİZE UYGUN AKTİF İLANLAR (Devam):</b>\n"
             current_msg += item + "\n\n"
 
     if current_msg.strip():
@@ -139,16 +133,14 @@ def send_telegram_messages(green_items: List[str]) -> bool:
 
     return all_success
 
-def ilan_basligi_mi(baslik_tr: str) -> bool:
-    """Başlığın bir duyuru/sonuç/haber değil, doğrudan ilan niteliğinde olup olmadığını kontrol eder."""
-    if len(baslik_tr) < 12 or len(baslik_tr) > 180:
+def temiz_ilan_basligi_mi(baslik_tr: str) -> bool:
+    if len(baslik_tr) < 12 or len(baslik_tr) > 150:
         return False
-    if any(k in baslik_tr for k in DUYURU_HARIC_IFADELER):
+    if any(k in baslik_tr for k in HABER_VE_KALABALIK_IFADELERI):
         return False
     return any(k in baslik_tr for k in ILAN_IFADELERI)
 
 def kaynak_ilanlari_getir(kaynak_adi: str, base_url: str) -> List[Dict[str, str]]:
-    """Verilen URL'deki bağlantılardan yalnızca ilan niteliğindeki kayıtları toplar."""
     ilanlar: List[Dict[str, str]] = []
     seen_links: Set[str] = set()
 
@@ -167,14 +159,12 @@ def kaynak_ilanlari_getir(kaynak_adi: str, base_url: str) -> List[Dict[str, str]
                 continue
 
             title_tr = tr_lower(title)
-            if not ilan_basligi_mi(title_tr):
+            if not temiz_ilan_basligi_mi(title_tr):
                 continue
 
             full_link = urljoin(res.url, href)
             parsed = urlparse(full_link)
-            if parsed.scheme not in ("http", "https"):
-                continue
-            if full_link in seen_links:
+            if parsed.scheme not in ("http", "https") or full_link in seen_links:
                 continue
             seen_links.add(full_link)
 
@@ -189,7 +179,6 @@ def kaynak_ilanlari_getir(kaynak_adi: str, base_url: str) -> List[Dict[str, str]
     return ilanlar
 
 def ilan_detay_getir(url: str) -> str:
-    """İlan detay sayfasından temizlenmiş metin çeker."""
     if not url:
         return ""
     try:
@@ -211,42 +200,71 @@ def ilan_detay_getir(url: str) -> str:
 
         res = requests.get(url, headers=HEADERS, timeout=8, allow_redirects=True)
         if res.status_code == 200:
-            clean_text = re.sub(r'<script.*?>.*?</script>', '', res.text, flags=re.DOTALL | re.IGNORECASE)
-            clean_text = re.sub(r'<style.*?>.*?</style>', '', clean_text, flags=re.DOTALL | re.IGNORECASE)
-            clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
-            return " ".join(html.unescape(clean_text).split())[:15000]
+            soup = BeautifulSoup(res.text, "html.parser")
+            for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
+                tag.decompose()
+            clean_text = soup.get_text(" ", strip=True)
+            return " ".join(clean_text.split())[:12000]
     except Exception as e:
         logging.debug(f"İlan detayı çekilemedi ({url}): {e}")
     return ""
 
-def son_basvuru_tarihi_bul(metin: str) -> str:
-    """Metin içerisindeki son başvuru tarihini regex ile yakalar."""
+def tarih_parse_et(tarih_str: str) -> Optional[date]:
+    temiz = tarih_str.strip().replace("/", ".").replace("-", ".")
+    for fmt in ("%d.%m.%Y", "%d.%m.%y"):
+        try:
+            return datetime.strptime(temiz, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+def son_basvuru_durumu_analiz(metin: str, bugun: date) -> Tuple[bool, str, bool]:
+    """
+    Dönüş: (aktif_mi, aciklama_metni, yeni_alim_mi)
+    Son başvuru tarihi açıkça bugünden önceyse False döner (eski/süresi dolmuş ilan).
+    """
     tarih_kaliplari = re.findall(
-        r'(?:son başvuru|son gün|tarihine kadar)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})',
+        r'(?:son başvuru|son gün|başvuru bitiş|tarihine kadar)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})',
         metin,
         re.IGNORECASE
     )
+
     if tarih_kaliplari:
-        return f"⏰ Son Başvuru: {tarih_kaliplari[0]}"
-    return "⏰ Son Başvuru: Detayda Belirtilmiş"
+        parsed_tarih = tarih_parse_et(tarih_kaliplari[0])
+        if parsed_tarih:
+            if parsed_tarih < bugun:
+                return False, "", False
+            yeni_mi = (parsed_tarih - bugun).days >= 0 and str(bugun.strftime("%d.%m.%Y")) in metin
+            return True, f"⏰ Son Başvuru: {parsed_tarih.strftime('%d.%m.%Y')}", yeni_mi
+        return True, f"⏰ Son Başvuru: {tarih_kaliplari[0]}", False
 
-def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[bool, str, str]:
-    """Yalnızca gerçek alım ilanlarını ve profilinize uyan kadroları kabul eder."""
+    # Tarih metinde açıkça geçmiyorsa devam eden/güncel kabul edip detayda kontrol edilmesini not düşeriz
+    return True, "⏰ Son Başvuru: Detayda Belirtilmiş", False
+
+def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, str, str, bool]:
     baslik_tr = tr_lower(baslik)
-    metin_tr = tr_lower(baslik + " " + detay_metni)
+    detay_tr = tr_lower(detay_metni)
+    metin_tr = baslik_tr + " " + detay_tr
 
-    if not ilan_basligi_mi(baslik_tr) and not any(k in metin_tr for k in ILAN_IFADELERI):
-        return False, "", ""
+    if any(k in baslik_tr for k in HABER_VE_KALABALIK_IFADELERI):
+        return False, "", "", False
 
-    if any(k in baslik_tr for k in DUYURU_HARIC_IFADELER):
-        return False, "", ""
+    if not temiz_ilan_basligi_mi(baslik_tr):
+        return False, "", "", False
 
-    # Lisans Hemşirelik Alım İlanı
-    if "hemşire" in metin_tr and any(k in metin_tr for k in ["lisans", "fakülte", "sağlık bilimleri", "hemşirelik"]):
-        deadline = son_basvuru_tarihi_bul(detay_metni)
-        return True, f"Lisans Hemşirelik alım ilanı doğrulandı. {deadline}", "Hemşirelik (Lisans)"
+    aktif_mi, deadline_str, yeni_mi = son_basvuru_durumu_analiz(detay_metni, bugun)
+    if not aktif_mi:
+        return False, "", "", False
 
-    # Adalet / Önlisans / 3001 / İlgili Kadro Alım İlanı
+    # 1. Lisans Hemşirelik
+    hemsire_baslikta_veya_kadrosunda = (
+        "hemşire" in baslik_tr
+        or bool(re.search(r'(?:alımı|alacak|alacaktır|kadrosu|unvanlı)\b[^.]{0,80}\bhemşire\b', detay_tr))
+    )
+    if hemsire_baslikta_veya_kadrosunda and any(k in metin_tr for k in ["lisans", "hemşirelik"]):
+        return True, f"Lisans Hemşirelik aktif alımı. {deadline_str}", "Hemşirelik (Lisans)", yeni_mi
+
+    # 2. Adalet / Önlisans / 3001 / İlgili Kadro
     adalet_zorunlu_kelimeler = [
         "adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi",
         "infaz koruma", "3001", "önlisans programlarının", "ön lisans programlarının",
@@ -265,17 +283,17 @@ def ilan_analiz_et(baslik: str, detay_metni: str) -> Tuple[bool, str, str]:
                 req_score = float(match.replace(',', '.'))
                 if 50.0 <= req_score <= 100.0:
                     if USER_PROFILE["kpss"] < req_score:
-                        return False, "", ""
+                        return False, "", "", False
             except ValueError:
                 continue
-        deadline = son_basvuru_tarihi_bul(detay_metni)
-        return True, f"Adalet / Önlisans alım ilanı doğrulandı. {deadline}", "Adalet (Önlisans)"
+        return True, f"Adalet / Önlisans aktif alımı. {deadline_str}", "Adalet (Önlisans)", yeni_mi
 
-    return False, "", ""
+    return False, "", "", False
 
 def main() -> None:
+    bugun = datetime.now().date()
     logging.info("============================================================")
-    logging.info("KAMU İLAN TAKİP (Yalnızca Alım İlanları Modu)")
+    logging.info(f"KAMU İLAN TAKİP (Resmi Kaynaklar + Aktif/Yeni Alımlar | {bugun})")
     logging.info("============================================================")
 
     sent_ids = load_sent_ids()
@@ -322,12 +340,13 @@ def main() -> None:
             continue
 
         detay = ilan_detay_getir(link) if link else ""
-        uygun_mu, aciklama, hedef_profil = ilan_analiz_et(baslik, detay)
+        uygun_mu, aciklama, hedef_profil, yeni_mi = ilan_analiz_et(baslik, detay, bugun)
 
         if not uygun_mu:
             continue
 
-        logging.info(f"[{idx}/{len(tekil_ilanlar)}] ({kaynak}) [{hedef_profil}] UYGUN İLAN -> {baslik}")
+        yeni_etiket = " 🚨 <b>[YENİ ALIM]</b>" if yeni_mi else ""
+        logging.info(f"[{idx}/{len(tekil_ilanlar)}] ({kaynak}) [{hedef_profil}] AKTİF İLAN -> {baslik}")
 
         clean_title = html.escape(baslik)
         clean_aciklama = html.escape(aciklama)
@@ -336,13 +355,13 @@ def main() -> None:
 
         if link:
             item_str = (
-                f"• [{clean_kaynak}] 🎯 <b>[{clean_profil}]</b>\n"
+                f"• [{clean_kaynak}] 🎯 <b>[{clean_profil}]</b>{yeni_etiket}\n"
                 f"  <a href='{html.escape(link, quote=True)}'><b>{clean_title}</b></a>\n"
                 f"  📌 <i>{clean_aciklama}</i>"
             )
         else:
             item_str = (
-                f"• [{clean_kaynak}] 🎯 <b>[{clean_profil}]</b>\n"
+                f"• [{clean_kaynak}] 🎯 <b>[{clean_profil}]</b>{yeni_etiket}\n"
                 f"  <b>{clean_title}</b>\n"
                 f"  📌 <i>{clean_aciklama}</i>"
             )
@@ -354,11 +373,11 @@ def main() -> None:
         sent_success = send_telegram_messages(yeni_green)
         if sent_success:
             save_sent_ids(new_sent_ids)
-            logging.info("Uygun ilanlar Telegram üzerinden bildirildi.")
+            logging.info("Yeni ve aktif uygun ilanlar Telegram üzerinden bildirildi.")
         else:
             logging.error("Telegram bildirimi sırasında hata oluştu.")
     else:
-        logging.info("Kriterlerinize tam uyan yeni bir ilan bulunamadı.")
+        logging.info("Kriterlerinize uyan yeni veya devam eden bir ilan bulunamadı.")
 
 if __name__ == "__main__":
     main()
