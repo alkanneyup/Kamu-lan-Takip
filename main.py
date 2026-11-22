@@ -5,6 +5,7 @@ import html
 import hashlib
 import logging
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, date
 from urllib.parse import urljoin, urlparse
 from typing import List, Dict, Tuple, Set, Optional
@@ -27,11 +28,9 @@ HEADERS = {
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
-# Haber/özet siteleri çıkarıldı; yalnızca resmi ve doğrudan ilan/kurum kaynakları bırakıldı
 SOURCES: List[Dict[str, str]] = [
     {"name": "Resmi Gazete", "url": "https://www.resmigazete.gov.tr"},
-    {"name": "Kariyer Kapısı (CBİKO)", "url": "https://isealimkariyerkapisi.cbiko.gov.tr"},
-    {"name": "SBB Kamu İlan", "url": "https://kamuilan.sbb.gov.tr"},
+    {"name": "Kariyer Kapısı", "url": "https://kariyerkapisi.gov.tr"},
     {"name": "İŞKUR E-Şube", "url": "https://esube.iskur.gov.tr"},
     {"name": "ÖSYM AİS", "url": "https://ais.osym.gov.tr"},
     {"name": "ÖSYM", "url": "https://www.osym.gov.tr"},
@@ -39,12 +38,14 @@ SOURCES: List[Dict[str, str]] = [
     {"name": "Sağlık Bakanlığı YHGM", "url": "https://yhgm.saglik.gov.tr"},
     {"name": "MEB Personel", "url": "https://personel.meb.gov.tr"},
     {"name": "İçişleri Bakanlığı Personel", "url": "https://www.icisleri.gov.tr/personel"},
-    {"name": "Polis Akademisi", "url": "https://www.pa.edu.tr"},
     {"name": "MSB Personel Temin", "url": "https://personeltemin.msb.gov.tr"},
-    {"name": "Jandarma PTM", "url": "https://vatandas.jandarma.gov.tr/PTM"},
-    {"name": "YÖK İlan", "url": "https://ilan.yok.gov.tr"},
     {"name": "Türkiye Belediyeler Birliği", "url": "https://www.tbb.gov.tr"},
     {"name": "Memurlar.net İlan", "url": "https://ilan.memurlar.net"},
+]
+
+ON_TOPLAMA_KELIMELERI = [
+    "ilan", "personel", "alım", "alacak", "alacaktır", "memur",
+    "sözleşmeli", "başvuru", "kpss", "tercih", "yerleştirme", "temin"
 ]
 
 HABER_VE_KALABALIK_IFADELERI = [
@@ -52,12 +53,13 @@ HABER_VE_KALABALIK_IFADELERI = [
     "şartları açıklandı", "kontenjanlar ve başvuru şartları", "bölüm şartı yok",
     "sınav yapılmayacak", "mühendis ve tekniker", "hizmetli, şoför",
     "kura", "mülakat", "sınav sonucu", "sonuçları", "tebligat",
-    "takvim", "yerleştirme sonuç", "nihai liste", "asıl ve yedek"
+    "takvim", "yerleştirme sonuç", "nihai liste", "asıl ve yedek",
+    "komisyon", "dilekçe", "ücret tarifesi", "mevzuat"
 ]
 
 ILAN_IFADELERI = [
     "alımı", "alım ilanı", "alacak", "alacaktır", "personel alım",
-    "memur alım", "sözleşmeli alım", "başvuru ilanı", "temini"
+    "memur alım", "sözleşmeli alım", "başvuru ilanı", "temini", "başvuru"
 ]
 
 def tr_lower(metin: str) -> str:
@@ -133,12 +135,24 @@ def send_telegram_messages(green_items: List[str]) -> bool:
 
     return all_success
 
-def temiz_ilan_basligi_mi(baslik_tr: str) -> bool:
-    if len(baslik_tr) < 12 or len(baslik_tr) > 150:
-        return False
-    if any(k in baslik_tr for k in HABER_VE_KALABALIK_IFADELERI):
-        return False
-    return any(k in baslik_tr for k in ILAN_IFADELERI)
+def kariyer_kapisi_rss_getir() -> List[Dict[str, str]]:
+    ilanlar: List[Dict[str, str]] = []
+    try:
+        res = requests.get("https://kariyerkapisi.gov.tr/RSS", headers=HEADERS, timeout=10)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            for item in root.findall("./channel/item"):
+                title = (item.find("title").text or "").strip() if item.find("title") is not None else ""
+                link = (item.find("link").text or "").strip() if item.find("link") is not None else ""
+                if title:
+                    ilanlar.append({
+                        "title": title,
+                        "link": link,
+                        "source": "Kariyer Kapısı RSS"
+                    })
+    except Exception as e:
+        logging.error(f"Kariyer Kapısı RSS çekilirken hata oluştu: {e}")
+    return ilanlar
 
 def kaynak_ilanlari_getir(kaynak_adi: str, base_url: str) -> List[Dict[str, str]]:
     ilanlar: List[Dict[str, str]] = []
@@ -157,9 +171,13 @@ def kaynak_ilanlari_getir(kaynak_adi: str, base_url: str) -> List[Dict[str, str]
 
             if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
                 continue
+            if len(title) < 10 or len(title) > 180:
+                continue
 
             title_tr = tr_lower(title)
-            if not temiz_ilan_basligi_mi(title_tr):
+            if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
+                continue
+            if not any(k in title_tr for k in ON_TOPLAMA_KELIMELERI):
                 continue
 
             full_link = urljoin(res.url, href)
@@ -219,10 +237,6 @@ def tarih_parse_et(tarih_str: str) -> Optional[date]:
     return None
 
 def son_basvuru_durumu_analiz(metin: str, bugun: date) -> Tuple[bool, str, bool]:
-    """
-    Dönüş: (aktif_mi, aciklama_metni, yeni_alim_mi)
-    Son başvuru tarihi açıkça bugünden önceyse False döner (eski/süresi dolmuş ilan).
-    """
     tarih_kaliplari = re.findall(
         r'(?:son başvuru|son gün|başvuru bitiş|tarihine kadar)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})',
         metin,
@@ -234,11 +248,10 @@ def son_basvuru_durumu_analiz(metin: str, bugun: date) -> Tuple[bool, str, bool]
         if parsed_tarih:
             if parsed_tarih < bugun:
                 return False, "", False
-            yeni_mi = (parsed_tarih - bugun).days >= 0 and str(bugun.strftime("%d.%m.%Y")) in metin
+            yeni_mi = bugun.strftime("%d.%m.%Y") in metin
             return True, f"⏰ Son Başvuru: {parsed_tarih.strftime('%d.%m.%Y')}", yeni_mi
         return True, f"⏰ Son Başvuru: {tarih_kaliplari[0]}", False
 
-    # Tarih metinde açıkça geçmiyorsa devam eden/güncel kabul edip detayda kontrol edilmesini not düşeriz
     return True, "⏰ Son Başvuru: Detayda Belirtilmiş", False
 
 def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, str, str, bool]:
@@ -249,7 +262,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
     if any(k in baslik_tr for k in HABER_VE_KALABALIK_IFADELERI):
         return False, "", "", False
 
-    if not temiz_ilan_basligi_mi(baslik_tr):
+    if not any(k in metin_tr for k in ILAN_IFADELERI):
         return False, "", "", False
 
     aktif_mi, deadline_str, yeni_mi = son_basvuru_durumu_analiz(detay_metni, bugun)
@@ -293,7 +306,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
 def main() -> None:
     bugun = datetime.now().date()
     logging.info("============================================================")
-    logging.info(f"KAMU İLAN TAKİP (Resmi Kaynaklar + Aktif/Yeni Alımlar | {bugun})")
+    logging.info(f"KAMU İLAN TAKİP (Güncel Kaynaklar + Aktif Alımlar | {bugun})")
     logging.info("============================================================")
 
     sent_ids = load_sent_ids()
@@ -305,10 +318,15 @@ def main() -> None:
         kaynak_url = src["url"]
         try:
             bulunanlar = kaynak_ilanlari_getir(kaynak_adi, kaynak_url)
-            logging.info(f"[{kaynak_adi}] -> {len(bulunanlar)} ilan başlığı bulundu.")
+            logging.info(f"[{kaynak_adi}] -> {len(bulunanlar)} aday bağlantı bulundu.")
             ilanlar.extend(bulunanlar)
         except Exception as e:
             logging.error(f"[{kaynak_adi}] genel tarama hatası: {e}")
+
+    rss_ilanlari = kariyer_kapisi_rss_getir()
+    if rss_ilanlari:
+        logging.info(f"[Kariyer Kapısı RSS] -> {len(rss_ilanlari)} kayıt eklendi.")
+        ilanlar.extend(rss_ilanlari)
 
     try:
         iskur_ilanlari = iskur_ilanlarini_getir()
