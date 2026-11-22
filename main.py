@@ -28,26 +28,6 @@ HEADERS = {
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
-SOURCES: List[Dict[str, str]] = [
-    {"name": "Resmi Gazete", "url": "https://www.resmigazete.gov.tr"},
-    {"name": "Kariyer Kapısı", "url": "https://kariyerkapisi.gov.tr"},
-    {"name": "İŞKUR E-Şube", "url": "https://esube.iskur.gov.tr"},
-    {"name": "ÖSYM AİS", "url": "https://ais.osym.gov.tr"},
-    {"name": "ÖSYM", "url": "https://www.osym.gov.tr"},
-    {"name": "Adalet Bakanlığı PGM", "url": "https://pgm.adalet.gov.tr"},
-    {"name": "Sağlık Bakanlığı YHGM", "url": "https://yhgm.saglik.gov.tr"},
-    {"name": "MEB Personel", "url": "https://personel.meb.gov.tr"},
-    {"name": "İçişleri Bakanlığı Personel", "url": "https://www.icisleri.gov.tr/personel"},
-    {"name": "MSB Personel Temin", "url": "https://personeltemin.msb.gov.tr"},
-    {"name": "Türkiye Belediyeler Birliği", "url": "https://www.tbb.gov.tr"},
-    {"name": "Memurlar.net İlan", "url": "https://ilan.memurlar.net"},
-]
-
-ON_TOPLAMA_KELIMELERI = [
-    "ilan", "personel", "alım", "alacak", "alacaktır", "memur",
-    "sözleşmeli", "başvuru", "kpss", "tercih", "yerleştirme", "temin"
-]
-
 HABER_VE_KALABALIK_IFADELERI = [
     "maaşlar ne kadar", "taban puanlar", "bu hafta", "ilan yayımlandı",
     "şartları açıklandı", "kontenjanlar ve başvuru şartları", "bölüm şartı yok",
@@ -71,7 +51,7 @@ def tr_lower(metin: str) -> str:
     return metin.lower()
 
 def generate_id(metin: str) -> str:
-    return hashlib.md5(metin.encode('utf-8')).hexdigest()
+    return hashlib.md5(metin.encode("utf-8")).hexdigest()
 
 def load_sent_ids() -> Set[str]:
     if os.path.exists("sent_ids.json"):
@@ -135,64 +115,103 @@ def send_telegram_messages(green_items: List[str]) -> bool:
 
     return all_success
 
-def kariyer_kapisi_rss_getir() -> List[Dict[str, str]]:
+def resmi_gazete_getir() -> List[Dict[str, str]]:
+    """Resmî Gazete ilanlarını çeker."""
     ilanlar: List[Dict[str, str]] = []
+    base_url = "https://www.resmigazete.gov.tr/"
+    seen: Set[str] = set()
     try:
-        res = requests.get("https://kariyerkapisi.gov.tr/RSS", headers=HEADERS, timeout=10)
+        res = requests.get(base_url, headers=HEADERS, timeout=12, allow_redirects=True)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            for a_tag in soup.find_all("a", href=True):
+                href = (a_tag.get("href") or "").strip()
+                title = " ".join(a_tag.get_text(" ", strip=True).split())
+                if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                    continue
+                if len(title) < 10 or len(title) > 200:
+                    continue
+                title_tr = tr_lower(title)
+                if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
+                    continue
+                if any(k in title_tr for k in ["ilan", "personel", "alım", "alacak", "memur", "sözleşmeli", "başvuru"]):
+                    full_link = urljoin(res.url, href)
+                    if full_link not in seen:
+                        seen.add(full_link)
+                        ilanlar.append({"title": title, "link": full_link, "source": "Resmî Gazete"})
+    except Exception as e:
+        logging.error(f"Resmî Gazete hatası: {e}")
+    return ilanlar
+
+def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
+    """SBB Kamu İlan portalından ilanları çeker."""
+    ilanlar: List[Dict[str, str]] = []
+    base_url = "https://kamuilan.sbb.gov.tr/"
+    seen: Set[str] = set()
+    try:
+        res = requests.get(base_url, headers=HEADERS, timeout=12, allow_redirects=True)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            for a_tag in soup.find_all("a", href=True):
+                href = (a_tag.get("href") or "").strip()
+                title = " ".join(a_tag.get_text(" ", strip=True).split())
+                if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                    continue
+                if len(title) < 10 or len(title) > 200:
+                    continue
+                title_tr = tr_lower(title)
+                if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
+                    continue
+                if any(k in title_tr for k in ["ilan", "personel", "alım", "alacak", "memur", "sözleşmeli", "başvuru"]):
+                    full_link = urljoin(res.url, href)
+                    if full_link not in seen:
+                        seen.add(full_link)
+                        ilanlar.append({"title": title, "link": full_link, "source": "SBB Kamu İlan"})
+        else:
+            logging.warning(f"SBB Kamu İlan HTTP {res.status_code} döndü.")
+    except Exception as e:
+        logging.error(f"SBB Kamu İlan hatası: {e}")
+    return ilanlar
+
+def kariyer_kapisi_getir() -> List[Dict[str, str]]:
+    """Kariyer Kapısı RSS ve ana sayfa bağlantılarından ilanları çeker."""
+    ilanlar: List[Dict[str, str]] = []
+    seen: Set[str] = set()
+
+    try:
+        res = requests.get("https://kariyerkapisi.gov.tr/RSS", headers=HEADERS, timeout=12)
         if res.status_code == 200:
             root = ET.fromstring(res.content)
             for item in root.findall("./channel/item"):
                 title = (item.find("title").text or "").strip() if item.find("title") is not None else ""
                 link = (item.find("link").text or "").strip() if item.find("link") is not None else ""
-                if title:
-                    ilanlar.append({
-                        "title": title,
-                        "link": link,
-                        "source": "Kariyer Kapısı RSS"
-                    })
+                if title and link and link not in seen:
+                    seen.add(link)
+                    ilanlar.append({"title": title, "link": link, "source": "Kariyer Kapısı"})
     except Exception as e:
-        logging.error(f"Kariyer Kapısı RSS çekilirken hata oluştu: {e}")
-    return ilanlar
-
-def kaynak_ilanlari_getir(kaynak_adi: str, base_url: str) -> List[Dict[str, str]]:
-    ilanlar: List[Dict[str, str]] = []
-    seen_links: Set[str] = set()
+        logging.error(f"Kariyer Kapısı RSS hatası: {e}")
 
     try:
-        res = requests.get(base_url, headers=HEADERS, timeout=10, allow_redirects=True)
-        if res.status_code != 200:
-            logging.warning(f"[{kaynak_adi}] HTTP {res.status_code} yanıtı döndü.")
-            return ilanlar
-
-        soup = BeautifulSoup(res.text, "html.parser")
-        for a_tag in soup.find_all("a", href=True):
-            href = (a_tag.get("href") or "").strip()
-            title = " ".join(a_tag.get_text(" ", strip=True).split())
-
-            if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
-                continue
-            if len(title) < 10 or len(title) > 180:
-                continue
-
-            title_tr = tr_lower(title)
-            if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
-                continue
-            if not any(k in title_tr for k in ON_TOPLAMA_KELIMELERI):
-                continue
-
-            full_link = urljoin(res.url, href)
-            parsed = urlparse(full_link)
-            if parsed.scheme not in ("http", "https") or full_link in seen_links:
-                continue
-            seen_links.add(full_link)
-
-            ilanlar.append({
-                "title": title,
-                "link": full_link,
-                "source": kaynak_adi
-            })
+        res = requests.get("https://kariyerkapisi.gov.tr/", headers=HEADERS, timeout=12, allow_redirects=True)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            for a_tag in soup.find_all("a", href=True):
+                href = (a_tag.get("href") or "").strip()
+                title = " ".join(a_tag.get_text(" ", strip=True).split())
+                if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                    continue
+                if len(title) < 10 or len(title) > 200:
+                    continue
+                title_tr = tr_lower(title)
+                if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
+                    continue
+                if any(k in title_tr for k in ["ilan", "personel", "alım", "alacak", "memur", "sözleşmeli", "başvuru"]):
+                    full_link = urljoin(res.url, href)
+                    if full_link not in seen:
+                        seen.add(full_link)
+                        ilanlar.append({"title": title, "link": full_link, "source": "Kariyer Kapısı"})
     except Exception as e:
-        logging.error(f"[{kaynak_adi}] veri çekilirken hata oluştu ({base_url}): {e}")
+        logging.error(f"Kariyer Kapısı web hatası: {e}")
 
     return ilanlar
 
@@ -201,7 +220,7 @@ def ilan_detay_getir(url: str) -> str:
         return ""
     try:
         if "kariyerkapisi" in url:
-            match = re.search(r'i=([a-f0-9-]+)', url, re.IGNORECASE)
+            match = re.search(r"i=([a-f0-9-]+)", url, re.IGNORECASE)
             if match:
                 guid = match.group(1)
                 api_url = f"https://kariyerkapisi.gov.tr/RSS/IlanDetayGetir?id={guid}"
@@ -211,7 +230,7 @@ def ilan_detay_getir(url: str) -> str:
                         data = res.json()
                         metin = data.get("Metin", "") or data.get("Açıklama", "") or str(data)
                         if metin and len(metin) > 50:
-                            clean_text = re.sub(r'<[^>]+>', ' ', metin)
+                            clean_text = re.sub(r"<[^>]+>", " ", metin)
                             return " ".join(html.unescape(clean_text).split())
                     except Exception:
                         pass
@@ -238,7 +257,7 @@ def tarih_parse_et(tarih_str: str) -> Optional[date]:
 
 def son_basvuru_durumu_analiz(metin: str, bugun: date) -> Tuple[bool, str, bool]:
     tarih_kaliplari = re.findall(
-        r'(?:son başvuru|son gün|başvuru bitiş|tarihine kadar)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})',
+        r"(?:son başvuru|son gün|başvuru bitiş|tarihine kadar)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})",
         metin,
         re.IGNORECASE
     )
@@ -272,7 +291,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
     # 1. Lisans Hemşirelik
     hemsire_baslikta_veya_kadrosunda = (
         "hemşire" in baslik_tr
-        or bool(re.search(r'(?:alımı|alacak|alacaktır|kadrosu|unvanlı)\b[^.]{0,80}\bhemşire\b', detay_tr))
+        or bool(re.search(r"(?:alımı|alacak|alacaktır|kadrosu|unvanlı)\b[^.]{0,80}\bhemşire\b", detay_tr))
     )
     if hemsire_baslikta_veya_kadrosunda and any(k in metin_tr for k in ["lisans", "hemşirelik"]):
         return True, f"Lisans Hemşirelik aktif alımı. {deadline_str}", "Hemşirelik (Lisans)", yeni_mi
@@ -290,10 +309,10 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
     )
 
     if any(k in metin_tr for k in adalet_zorunlu_kelimeler) or buro_ve_onlisans:
-        kpss_matches = re.findall(r'(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)', metin_tr)
+        kpss_matches = re.findall(r"(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)", metin_tr)
         for match in kpss_matches:
             try:
-                req_score = float(match.replace(',', '.'))
+                req_score = float(match.replace(",", "."))
                 if 50.0 <= req_score <= 100.0:
                     if USER_PROFILE["kpss"] < req_score:
                         return False, "", "", False
@@ -303,99 +322,3 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
 
     return False, "", "", False
 
-def main() -> None:
-    bugun = datetime.now().date()
-    logging.info("============================================================")
-    logging.info(f"KAMU İLAN TAKİP (Güncel Kaynaklar + Aktif Alımlar | {bugun})")
-    logging.info("============================================================")
-
-    sent_ids = load_sent_ids()
-    new_sent_ids = set(sent_ids)
-    ilanlar: List[Dict[str, str]] = []
-
-    for src in SOURCES:
-        kaynak_adi = src["name"]
-        kaynak_url = src["url"]
-        try:
-            bulunanlar = kaynak_ilanlari_getir(kaynak_adi, kaynak_url)
-            logging.info(f"[{kaynak_adi}] -> {len(bulunanlar)} aday bağlantı bulundu.")
-            ilanlar.extend(bulunanlar)
-        except Exception as e:
-            logging.error(f"[{kaynak_adi}] genel tarama hatası: {e}")
-
-    rss_ilanlari = kariyer_kapisi_rss_getir()
-    if rss_ilanlari:
-        logging.info(f"[Kariyer Kapısı RSS] -> {len(rss_ilanlari)} kayıt eklendi.")
-        ilanlar.extend(rss_ilanlari)
-
-    try:
-        iskur_ilanlari = iskur_ilanlarini_getir()
-        if iskur_ilanlari:
-            logging.info(f"[İŞKUR Modülü] -> {len(iskur_ilanlari)} kayıt eklendi.")
-            ilanlar.extend(iskur_ilanlari)
-    except Exception as e:
-        logging.error(f"İŞKUR modülü hata: {e}")
-
-    tekil_ilanlar: List[Dict[str, str]] = []
-    gorulen_idler: Set[str] = set()
-    for ilan in ilanlar:
-        uid = generate_id(ilan.get("link") or ilan.get("title", ""))
-        if uid not in gorulen_idler:
-            gorulen_idler.add(uid)
-            tekil_ilanlar.append(ilan)
-
-    logging.info(f"Toplam Taranacak Tekil İlan Sayısı: {len(tekil_ilanlar)}")
-
-    yeni_green: List[str] = []
-
-    for idx, ilan in enumerate(tekil_ilanlar, 1):
-        baslik = ilan.get("title", "")
-        link = ilan.get("link", "")
-        kaynak = ilan.get("source", "Kamu Portalı")
-
-        ilan_id = generate_id(link if link else baslik)
-        if ilan_id in sent_ids:
-            continue
-
-        detay = ilan_detay_getir(link) if link else ""
-        uygun_mu, aciklama, hedef_profil, yeni_mi = ilan_analiz_et(baslik, detay, bugun)
-
-        if not uygun_mu:
-            continue
-
-        yeni_etiket = " 🚨 <b>[YENİ ALIM]</b>" if yeni_mi else ""
-        logging.info(f"[{idx}/{len(tekil_ilanlar)}] ({kaynak}) [{hedef_profil}] AKTİF İLAN -> {baslik}")
-
-        clean_title = html.escape(baslik)
-        clean_aciklama = html.escape(aciklama)
-        clean_kaynak = html.escape(kaynak)
-        clean_profil = html.escape(hedef_profil)
-
-        if link:
-            item_str = (
-                f"• [{clean_kaynak}] 🎯 <b>[{clean_profil}]</b>{yeni_etiket}\n"
-                f"  <a href='{html.escape(link, quote=True)}'><b>{clean_title}</b></a>\n"
-                f"  📌 <i>{clean_aciklama}</i>"
-            )
-        else:
-            item_str = (
-                f"• [{clean_kaynak}] 🎯 <b>[{clean_profil}]</b>{yeni_etiket}\n"
-                f"  <b>{clean_title}</b>\n"
-                f"  📌 <i>{clean_aciklama}</i>"
-            )
-
-        yeni_green.append(item_str)
-        new_sent_ids.add(ilan_id)
-
-    if yeni_green:
-        sent_success = send_telegram_messages(yeni_green)
-        if sent_success:
-            save_sent_ids(new_sent_ids)
-            logging.info("Yeni ve aktif uygun ilanlar Telegram üzerinden bildirildi.")
-        else:
-            logging.error("Telegram bildirimi sırasında hata oluştu.")
-    else:
-        logging.info("Kriterlerinize uyan yeni veya devam eden bir ilan bulunamadı.")
-
-if __name__ == "__main__":
-    main()
