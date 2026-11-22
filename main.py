@@ -12,7 +12,6 @@ from urllib.parse import urljoin
 from typing import List, Dict, Tuple, Set, Optional
 from bs4 import BeautifulSoup
 
-# Çıktının GitHub Actions'ta anında görünmesi için tamponlamayı kapat
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
 
@@ -210,12 +209,12 @@ def kariyer_kapisi_getir() -> List[Dict[str, str]]:
                 title = " ".join(a_tag.get_text(" ", strip=True).split())
                 if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
                     continue
-                if len(title) < 10 or len(title) > 200:
+                if len(title) < 8 or len(title) > 220:
                     continue
                 title_tr = tr_lower(title)
                 if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
                     continue
-                if any(k in title_tr for k in ["ilan", "personel", "alım", "alacak", "memur", "sözleşmeli", "başvuru"]):
+                if any(k in title_tr for k in ["ilan", "personel", "alım", "alacak", "memur", "sözleşmeli", "başvuru", "üniversite", "büro"]):
                     full_link = urljoin(res.url, href)
                     if full_link not in seen:
                         seen.add(full_link)
@@ -298,6 +297,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
     if not aktif_mi:
         return False, "", "", False
 
+    # 1. Lisans Hemşirelik
     hemsire_baslikta_veya_kadrosunda = (
         "hemşire" in baslik_tr
         or bool(re.search(r"(?:alımı|alacak|alacaktır|kadrosu|unvanlı)\b[^.]{0,80}\bhemşire\b", detay_tr))
@@ -305,6 +305,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
     if hemsire_baslikta_veya_kadrosunda and any(k in metin_tr for k in ["lisans", "hemşirelik"]):
         return True, f"Lisans Hemşirelik aktif alımı. {deadline_str}", "Hemşirelik (Lisans)", yeni_mi
 
+    # 2. Adalet / Önlisans / P93 / 3001 / Büro Personeli
     adalet_zorunlu_kelimeler = [
         "adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi",
         "infaz koruma", "3001", "önlisans programlarının", "ön lisans programlarının",
@@ -313,7 +314,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
 
     buro_ve_onlisans = (
         any(b in metin_tr for b in ["büro personeli", "koruma ve güvenlik", "destek personeli"])
-        and any(e in metin_tr for e in ["önlisans", "ön lisans", "myo"])
+        and any(e in metin_tr for e in ["önlisans", "ön lisans", "myo", "p93", "kpss"])
     )
 
     if any(k in metin_tr for k in adalet_zorunlu_kelimeler) or buro_ve_onlisans:
@@ -353,6 +354,8 @@ def main() -> None:
     logging.info("3/4 Kariyer Kapısı taranıyor...")
     kk_ilanlari = kariyer_kapisi_getir()
     logging.info(f"[Kariyer Kapısı] -> {len(kk_ilanlari)} aday kayıt bulundu.")
+    for item in kk_ilanlari:
+        logging.info(f"  [KK Aday] {item.get('title')} -> {item.get('link')}")
     ilanlar.extend(kk_ilanlari)
 
     logging.info("4/4 İŞKUR taranıyor...")
@@ -391,6 +394,7 @@ def main() -> None:
         uygun_mu, aciklama, hedef_profil, yeni_mi = ilan_analiz_et(baslik, detay, bugun)
 
         if not uygun_mu:
+            logging.debug(f"Elenen kayıt: {baslik} ({link})")
             continue
 
         yeni_etiket = " 🚨 <b>[YENİ ALIM]</b>" if yeni_mi else ""
