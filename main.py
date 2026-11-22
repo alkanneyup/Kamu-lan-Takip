@@ -9,7 +9,7 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, date
 from urllib.parse import urljoin
-from typing import List, Dict, Tuple, Set, Optional
+from typing import List, Dict, Tuple, Set, Optional, Any
 from bs4 import BeautifulSoup
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -41,17 +41,18 @@ HEADERS = {
 }
 
 HABER_VE_KALABALIK_IFADELERI = [
-    "maaşlar ne kadar", "taban puanlar", "bu hafta", "ilan yayımlandı",
-    "şartları açıklandı", "kontenjanlar ve başvuru şartları", "bölüm şartı yok",
+    "haber", "duyuru", "duyurusu", "maaşlar ne kadar", "taban puanlar",
+    "bu hafta", "ilan yayımlandı", "şartları açıklandı",
+    "kontenjanlar ve başvuru şartları", "bölüm şartı yok",
     "sınav yapılmayacak", "mühendis ve tekniker", "hizmetli, şoför",
-    "kura", "mülakat", "sınav sonucu", "sonuçları", "tebligat",
-    "takvim", "yerleştirme sonuç", "nihai liste", "asıl ve yedek",
-    "komisyon", "dilekçe", "ücret tarifesi", "mevzuat"
+    "kura", "mülakat", "sınav sonucu", "sonuçları", "sonucu",
+    "tebligat", "takvim", "yerleştirme sonuç", "nihai liste",
+    "asıl ve yedek", "komisyon", "dilekçe", "ücret tarifesi", "mevzuat"
 ]
 
-ILAN_IFADELERI = [
-    "alımı", "alım ilanı", "alacak", "alacaktır", "personel alım",
-    "memur alım", "sözleşmeli alım", "başvuru ilanı", "temini", "başvuru"
+BASVURU_ILANI_IFADELERI = [
+    "alım ilanı", "personel alım", "memur alım", "sözleşmeli alım",
+    "alımı", "alacak", "alacaktır", "temini", "başvuru ilanı"
 ]
 
 def tr_lower(metin: str) -> str:
@@ -94,7 +95,7 @@ def send_telegram_messages(green_items: List[str]) -> bool:
     chat_ids = [cid.strip() for cid in raw_chat_ids.split(",") if cid.strip()]
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     messages: List[str] = []
-    current_msg = "📢 <b>YENİ VE AKTİF KAMU İLANLARI</b>\n\n"
+    current_msg = "📢 <b>YENİ VE AKTİF BAŞVURU İLANLARI</b>\n\n"
 
     if green_items:
         current_msg += "🟢 <b>SİZE UYGUN AKTİF İLANLAR:</b>\n"
@@ -145,7 +146,7 @@ def resmi_gazete_getir() -> List[Dict[str, str]]:
                 title_tr = tr_lower(title)
                 if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
                     continue
-                if any(k in title_tr for k in ["ilan", "personel", "alım", "alacak", "memur", "sözleşmeli", "başvuru"]):
+                if any(k in title_tr for k in BASVURU_ILANI_IFADELERI):
                     full_link = urljoin(res.url, href)
                     if full_link not in seen:
                         seen.add(full_link)
@@ -172,7 +173,7 @@ def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
                 title_tr = tr_lower(title)
                 if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
                     continue
-                if any(k in title_tr for k in ["ilan", "personel", "alım", "alacak", "memur", "sözleşmeli", "başvuru"]):
+                if any(k in title_tr for k in BASVURU_ILANI_IFADELERI):
                     full_link = urljoin(res.url, href)
                     if full_link not in seen:
                         seen.add(full_link)
@@ -194,7 +195,8 @@ def kariyer_kapisi_getir() -> List[Dict[str, str]]:
             for item in root.findall("./channel/item"):
                 title = (item.find("title").text or "").strip() if item.find("title") is not None else ""
                 link = (item.find("link").text or "").strip() if item.find("link") is not None else ""
-                if title and link and link not in seen:
+                title_tr = tr_lower(title)
+                if title and link and link not in seen and not any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
                     seen.add(link)
                     ilanlar.append({"title": title, "link": link, "source": "Kariyer Kapısı"})
     except Exception as e:
@@ -214,7 +216,7 @@ def kariyer_kapisi_getir() -> List[Dict[str, str]]:
                 title_tr = tr_lower(title)
                 if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
                     continue
-                if any(k in title_tr for k in ["ilan", "personel", "alım", "alacak", "memur", "sözleşmeli", "başvuru", "üniversite", "büro"]):
+                if any(k in title_tr for k in BASVURU_ILANI_IFADELERI):
                     full_link = urljoin(res.url, href)
                     if full_link not in seen:
                         seen.add(full_link)
@@ -224,9 +226,23 @@ def kariyer_kapisi_getir() -> List[Dict[str, str]]:
 
     return ilanlar
 
+def _json_metin_topla(obj: Any) -> str:
+    if isinstance(obj, str):
+        temiz = re.sub(r"<[^>]+>", " ", obj)
+        return " ".join(html.unescape(temiz).split())
+    if isinstance(obj, dict):
+        parcalar = [_json_metin_topla(v) for v in obj.values()]
+        return " ".join(p for p in parcalar if p)
+    if isinstance(obj, list):
+        parcalar = [_json_metin_topla(v) for v in obj]
+        return " ".join(p for p in parcalar if p)
+    return ""
+
 def ilan_detay_getir(url: str) -> str:
     if not url:
         return ""
+    parcalar: List[str] = []
+
     try:
         if "kariyerkapisi" in url:
             match = re.search(r"i=([a-f0-9-]+)", url, re.IGNORECASE)
@@ -237,12 +253,12 @@ def ilan_detay_getir(url: str) -> str:
                 if res.status_code == 200:
                     try:
                         data = res.json()
-                        metin = data.get("Metin", "") or data.get("Açıklama", "") or str(data)
-                        if metin and len(metin) > 50:
-                            clean_text = re.sub(r"<[^>]+>", " ", metin)
-                            return " ".join(html.unescape(clean_text).split())
+                        metin = _json_metin_topla(data)
+                        if metin:
+                            parcalar.append(metin)
                     except Exception:
-                        pass
+                        clean_text = re.sub(r"<[^>]+>", " ", res.text)
+                        parcalar.append(" ".join(html.unescape(clean_text).split()))
 
         res = requests.get(url, headers=HEADERS, timeout=(4, 8), allow_redirects=True)
         if res.status_code == 200:
@@ -250,10 +266,12 @@ def ilan_detay_getir(url: str) -> str:
             for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
                 tag.decompose()
             clean_text = soup.get_text(" ", strip=True)
-            return " ".join(clean_text.split())[:12000]
+            parcalar.append(" ".join(clean_text.split()))
     except Exception as e:
         logging.debug(f"İlan detayı çekilemedi ({url}): {e}")
-    return ""
+
+    birlesik = " ".join(p for p in parcalar if p).strip()
+    return birlesik[:15000]
 
 def tarih_parse_et(tarih_str: str) -> Optional[date]:
     temiz = tarih_str.strip().replace("/", ".").replace("-", ".")
@@ -282,20 +300,20 @@ def son_basvuru_durumu_analiz(metin: str, bugun: date) -> Tuple[bool, str, bool]
 
     return True, "⏰ Son Başvuru: Detayda Belirtilmiş", False
 
-def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, str, str, bool]:
+def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, str, str, bool, str]:
     baslik_tr = tr_lower(baslik)
     detay_tr = tr_lower(detay_metni)
     metin_tr = baslik_tr + " " + detay_tr
 
     if any(k in baslik_tr for k in HABER_VE_KALABALIK_IFADELERI):
-        return False, "", "", False
+        return False, "", "", False, "haber/duyuru/sonuç kaydı"
 
-    if not any(k in metin_tr for k in ILAN_IFADELERI):
-        return False, "", "", False
+    if not any(k in metin_tr for k in BASVURU_ILANI_IFADELERI):
+        return False, "", "", False, "başvuru ilanı ifadesi yok"
 
     aktif_mi, deadline_str, yeni_mi = son_basvuru_durumu_analiz(detay_metni, bugun)
     if not aktif_mi:
-        return False, "", "", False
+        return False, "", "", False, "başvuru süresi geçmiş"
 
     # 1. Lisans Hemşirelik
     hemsire_baslikta_veya_kadrosunda = (
@@ -303,7 +321,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
         or bool(re.search(r"(?:alımı|alacak|alacaktır|kadrosu|unvanlı)\b[^.]{0,80}\bhemşire\b", detay_tr))
     )
     if hemsire_baslikta_veya_kadrosunda and any(k in metin_tr for k in ["lisans", "hemşirelik"]):
-        return True, f"Lisans Hemşirelik aktif alımı. {deadline_str}", "Hemşirelik (Lisans)", yeni_mi
+        return True, f"Lisans Hemşirelik başvuru ilanı. {deadline_str}", "Hemşirelik (Lisans)", yeni_mi, "ok"
 
     # 2. Adalet / Önlisans / P93 / 3001 / Büro Personeli
     adalet_zorunlu_kelimeler = [
@@ -313,8 +331,8 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
     ]
 
     buro_ve_onlisans = (
-        any(b in metin_tr for b in ["büro personeli", "koruma ve güvenlik", "destek personeli"])
-        and any(e in metin_tr for e in ["önlisans", "ön lisans", "myo", "p93", "kpss"])
+        any(b in metin_tr for b in ["büro personeli", "büro destek", "koruma ve güvenlik", "destek personeli"])
+        and any(e in metin_tr for e in ["önlisans", "ön lisans", "myo", "meslek yüksekokulu", "p93"])
     )
 
     if any(k in metin_tr for k in adalet_zorunlu_kelimeler) or buro_ve_onlisans:
@@ -324,17 +342,17 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
                 req_score = float(match.replace(",", "."))
                 if 50.0 <= req_score <= 100.0:
                     if USER_PROFILE["kpss"] < req_score:
-                        return False, "", "", False
+                        return False, "", "", False, f"kpss yetersiz ({req_score})"
             except ValueError:
                 continue
-        return True, f"Adalet / Önlisans aktif alımı. {deadline_str}", "Adalet (Önlisans)", yeni_mi
+        return True, f"Adalet / Önlisans başvuru ilanı. {deadline_str}", "Adalet (Önlisans)", yeni_mi, "ok"
 
-    return False, "", "", False
+    return False, "", "", False, f"profil eşleşmedi (detay_len={len(detay_metni)})"
 
 def main() -> None:
     bugun = datetime.now().date()
     logging.info("============================================================")
-    logging.info(f"KAMU İLAN TAKİP BAŞLADI ({bugun})")
+    logging.info(f"KAMU BAŞVURU İLANLARI TAKİBİ ({bugun})")
     logging.info("============================================================")
 
     sent_ids = load_sent_ids()
@@ -343,17 +361,17 @@ def main() -> None:
 
     logging.info("1/4 Resmî Gazete taranıyor...")
     rg_ilanlari = resmi_gazete_getir()
-    logging.info(f"[Resmî Gazete] -> {len(rg_ilanlari)} aday kayıt bulundu.")
+    logging.info(f"[Resmî Gazete] -> {len(rg_ilanlari)} başvuru adayı bulundu.")
     ilanlar.extend(rg_ilanlari)
 
     logging.info("2/4 SBB Kamu İlan taranıyor...")
     sbb_ilanlari = sbb_kamu_ilan_getir()
-    logging.info(f"[SBB Kamu İlan] -> {len(sbb_ilanlari)} aday kayıt bulundu.")
+    logging.info(f"[SBB Kamu İlan] -> {len(sbb_ilanlari)} başvuru adayı bulundu.")
     ilanlar.extend(sbb_ilanlari)
 
     logging.info("3/4 Kariyer Kapısı taranıyor...")
     kk_ilanlari = kariyer_kapisi_getir()
-    logging.info(f"[Kariyer Kapısı] -> {len(kk_ilanlari)} aday kayıt bulundu.")
+    logging.info(f"[Kariyer Kapısı] -> {len(kk_ilanlari)} başvuru adayı bulundu.")
     for item in kk_ilanlari:
         logging.info(f"  [KK Aday] {item.get('title')} -> {item.get('link')}")
     ilanlar.extend(kk_ilanlari)
@@ -362,10 +380,10 @@ def main() -> None:
     try:
         iskur_ilanlari = iskur_ilanlarini_getir()
         if iskur_ilanlari:
-            logging.info(f"[İŞKUR] -> {len(iskur_ilanlari)} aday kayıt bulundu.")
+            logging.info(f"[İŞKUR] -> {len(iskur_ilanlari)} başvuru adayı bulundu.")
             ilanlar.extend(iskur_ilanlari)
         else:
-            logging.info("[İŞKUR] -> 0 aday kayıt bulundu.")
+            logging.info("[İŞKUR] -> 0 başvuru adayı bulundu.")
     except Exception as e:
         logging.error(f"İŞKUR modülü hata: {e}")
 
@@ -377,7 +395,7 @@ def main() -> None:
             gorulen_idler.add(uid)
             tekil_ilanlar.append(ilan)
 
-    logging.info(f"Toplam Taranacak Tekil İlan Sayısı: {len(tekil_ilanlar)}")
+    logging.info(f"Toplam Taranacak Tekil Başvuru İlanı: {len(tekil_ilanlar)}")
 
     yeni_green: List[str] = []
 
@@ -391,14 +409,15 @@ def main() -> None:
             continue
 
         detay = ilan_detay_getir(link) if link else ""
-        uygun_mu, aciklama, hedef_profil, yeni_mi = ilan_analiz_et(baslik, detay, bugun)
+        uygun_mu, aciklama, hedef_profil, yeni_mi, sebep = ilan_analiz_et(baslik, detay, bugun)
 
         if not uygun_mu:
-            logging.debug(f"Elenen kayıt: {baslik} ({link})")
+            if "bartın" in tr_lower(baslik) or "büro" in tr_lower(baslik):
+                logging.info(f"  [Elenen İlan] {baslik} -> Sebep: {sebep}")
             continue
 
         yeni_etiket = " 🚨 <b>[YENİ ALIM]</b>" if yeni_mi else ""
-        logging.info(f"[{idx}/{len(tekil_ilanlar)}] ({kaynak}) [{hedef_profil}] AKTİF İLAN -> {baslik}")
+        logging.info(f"[{idx}/{len(tekil_ilanlar)}] ({kaynak}) [{hedef_profil}] AKTİF BAŞVURU -> {baslik}")
 
         clean_title = html.escape(baslik)
         clean_aciklama = html.escape(aciklama)
@@ -425,11 +444,11 @@ def main() -> None:
         sent_success = send_telegram_messages(yeni_green)
         if sent_success:
             save_sent_ids(new_sent_ids)
-            logging.info("Yeni ve aktif uygun ilanlar Telegram üzerinden bildirildi.")
+            logging.info("Yeni ve aktif başvuru ilanları Telegram üzerinden bildirildi.")
         else:
             logging.error("Telegram bildirimi sırasında hata oluştu.")
     else:
-        logging.info("Kriterlerinize uyan yeni veya devam eden bir ilan bulunamadı.")
+        logging.info("Kriterlerinize uyan yeni veya aktif başvuru ilanı bulunamadı.")
 
     logging.info("Tarama tamamlandı.")
 
