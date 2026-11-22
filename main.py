@@ -248,25 +248,39 @@ def ilan_detay_getir(url: str) -> str:
             match = re.search(r"i=([a-f0-9-]+)", url, re.IGNORECASE)
             if match:
                 guid = match.group(1)
-                api_url = f"https://kariyerkapisi.gov.tr/RSS/IlanDetayGetir?id={guid}"
-                res = requests.get(api_url, headers=HEADERS, timeout=(4, 8))
-                if res.status_code == 200:
+                for api_url in [
+                    f"https://kariyerkapisi.gov.tr/RSS/IlanDetayGetir?id={guid}",
+                    f"https://kariyerkapisi.gov.tr/IlanDetay/Getir?id={guid}"
+                ]:
                     try:
-                        data = res.json()
-                        metin = _json_metin_topla(data)
-                        if metin:
-                            parcalar.append(metin)
+                        res = requests.get(api_url, headers=HEADERS, timeout=(4, 8))
+                        if res.status_code == 200:
+                            try:
+                                data = res.json()
+                                metin = _json_metin_topla(data)
+                                if metin:
+                                    parcalar.append(metin)
+                            except Exception:
+                                clean_text = re.sub(r"<[^>]+>", " ", res.text)
+                                parcalar.append(" ".join(html.unescape(clean_text).split()))
                     except Exception:
-                        clean_text = re.sub(r"<[^>]+>", " ", res.text)
-                        parcalar.append(" ".join(html.unescape(clean_text).split()))
+                        continue
 
         res = requests.get(url, headers=HEADERS, timeout=(4, 8), allow_redirects=True)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
+            script_metinleri: List[str] = []
+            for script in soup.find_all("script"):
+                raw_s = script.string or script.get_text() or ""
+                if raw_s.strip():
+                    temiz_s = re.sub(r"<[^>]+>", " ", raw_s)
+                    script_metinleri.append(" ".join(html.unescape(temiz_s).split()))
             for tag in soup(["script", "style", "nav", "header", "footer", "aside"]):
                 tag.decompose()
-            clean_text = soup.get_text(" ", strip=True)
-            parcalar.append(" ".join(clean_text.split()))
+            clean_text = " ".join(soup.get_text(" ", strip=True).split())
+            parcalar.append(clean_text)
+            if len(clean_text) < 300 and script_metinleri:
+                parcalar.append(" ".join(script_metinleri)[:6000])
     except Exception as e:
         logging.debug(f"İlan detayı çekilemedi ({url}): {e}")
 
@@ -347,6 +361,11 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
                 continue
         return True, f"Adalet / Önlisans başvuru ilanı. {deadline_str}", "Adalet (Önlisans)", yeni_mi, "ok"
 
+    # 3. Detay tablosu dinamik yükleniyorsa (detay_len < 300) Üniversite / Belediye sözleşmeli/memur alımlarını kaçırmamak için kontrol
+    if len(detay_metni.strip()) < 300 and any(kurum in baslik_tr for kurum in ["üniversite", "belediye"]):
+        if any(alim in baslik_tr for alim in ["sözleşmeli personel alım", "personel alım", "memur alım", "alım ilanı"]):
+            return True, f"Üniversite/Belediye başvuru ilanı (detay tablosu dinamik). {deadline_str}", "Adalet / Önlisans (Kontrol)", yeni_mi, "ok_dinamik"
+
     return False, "", "", False, f"profil eşleşmedi (detay_len={len(detay_metni)})"
 
 def main() -> None:
@@ -372,8 +391,6 @@ def main() -> None:
     logging.info("3/4 Kariyer Kapısı taranıyor...")
     kk_ilanlari = kariyer_kapisi_getir()
     logging.info(f"[Kariyer Kapısı] -> {len(kk_ilanlari)} başvuru adayı bulundu.")
-    for item in kk_ilanlari:
-        logging.info(f"  [KK Aday] {item.get('title')} -> {item.get('link')}")
     ilanlar.extend(kk_ilanlari)
 
     logging.info("4/4 İŞKUR taranıyor...")
@@ -412,8 +429,6 @@ def main() -> None:
         uygun_mu, aciklama, hedef_profil, yeni_mi, sebep = ilan_analiz_et(baslik, detay, bugun)
 
         if not uygun_mu:
-            if "bartın" in tr_lower(baslik) or "büro" in tr_lower(baslik):
-                logging.info(f"  [Elenen İlan] {baslik} -> Sebep: {sebep}")
             continue
 
         yeni_etiket = " 🚨 <b>[YENİ ALIM]</b>" if yeni_mi else ""
