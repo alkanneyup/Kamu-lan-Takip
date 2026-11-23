@@ -35,7 +35,11 @@ USER_PROFILE = {
 }
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
@@ -155,33 +159,95 @@ def resmi_gazete_getir() -> List[Dict[str, str]]:
         logging.error(f"Resmî Gazete hatası: {e}")
     return ilanlar
 
+def _sbb_oturum_olustur() -> requests.Session:
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,image/apng,*/*;q=0.8"
+        ),
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+    })
+    return session
+
 def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
     ilanlar: List[Dict[str, str]] = []
     base_url = "https://kamuilan.sbb.gov.tr/"
+    aday_yollar = [
+        base_url,
+        urljoin(base_url, "ilanlar"),
+        urljoin(base_url, "tum-ilanlar"),
+    ]
     seen: Set[str] = set()
+    session = _sbb_oturum_olustur()
+
     try:
-        res = requests.get(base_url, headers=HEADERS, timeout=(5, 10), allow_redirects=True)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            for a_tag in soup.find_all("a", href=True):
-                href = (a_tag.get("href") or "").strip()
-                title = " ".join(a_tag.get_text(" ", strip=True).split())
-                if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+        ilk_res = session.get(base_url, timeout=(6, 12), allow_redirects=True)
+        if ilk_res.status_code == 403:
+            logging.warning(
+                "SBB Kamu İlan HTTP 403 döndü (WAF/IP/TLS veya tarayıcı doğrulaması engelliyor)."
+            )
+            return ilanlar
+
+        session.headers.update({
+            "Referer": ilk_res.url or base_url,
+            "Sec-Fetch-Site": "same-origin",
+        })
+
+        for hedef_url in aday_yollar:
+            try:
+                res = (
+                    ilk_res
+                    if hedef_url == base_url
+                    else session.get(hedef_url, timeout=(6, 12), allow_redirects=True)
+                )
+                if res.status_code != 200:
+                    logging.warning(f"SBB Kamu İlan ({hedef_url}) HTTP {res.status_code} döndü.")
                     continue
-                if len(title) < 10 or len(title) > 200:
-                    continue
-                title_tr = tr_lower(title)
-                if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
-                    continue
-                if any(k in title_tr for k in BASVURU_ILANI_IFADELERI):
-                    full_link = urljoin(res.url, href)
-                    if full_link not in seen:
-                        seen.add(full_link)
-                        ilanlar.append({"title": title, "link": full_link, "source": "SBB Kamu İlan"})
-        else:
-            logging.warning(f"SBB Kamu İlan HTTP {res.status_code} döndü.")
+
+                soup = BeautifulSoup(res.text, "html.parser")
+                for a_tag in soup.find_all("a", href=True):
+                    href = (a_tag.get("href") or "").strip()
+                    title = " ".join(a_tag.get_text(" ", strip=True).split())
+                    if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                        continue
+                    if len(title) < 10 or len(title) > 200:
+                        continue
+                    title_tr = tr_lower(title)
+                    if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
+                        continue
+                    if any(k in title_tr for k in BASVURU_ILANI_IFADELERI):
+                        full_link = urljoin(res.url, href)
+                        if full_link not in seen:
+                            seen.add(full_link)
+                            ilanlar.append({
+                                "title": title,
+                                "link": full_link,
+                                "source": "SBB Kamu İlan",
+                            })
+            except Exception as inner_err:
+                logging.debug(f"SBB alt yol kontrol edilemedi ({hedef_url}): {inner_err}")
+
     except Exception as e:
         logging.error(f"SBB Kamu İlan hatası: {e}")
+    finally:
+        session.close()
+
     return ilanlar
 
 def kariyer_kapisi_getir() -> List[Dict[str, str]]:
@@ -361,7 +427,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
                 continue
         return True, f"Adalet / Önlisans başvuru ilanı. {deadline_str}", "Adalet (Önlisans)", yeni_mi, "ok"
 
-    # 3. Detay tablosu dinamik yükleniyorsa (detay_len < 300) Üniversite / Belediye sözleşmeli/memur alımlarını kaçırmamak için kontrol
+    # 3. Detay tablosu dinamik yükleniyorsa Üniversite / Belediye başvuru ilanlarını kaçırmamak için kontrol
     if len(detay_metni.strip()) < 300 and any(kurum in baslik_tr for kurum in ["üniversite", "belediye"]):
         if any(alim in baslik_tr for alim in ["sözleşmeli personel alım", "personel alım", "memur alım", "alım ilanı"]):
             return True, f"Üniversite/Belediye başvuru ilanı (detay tablosu dinamik). {deadline_str}", "Adalet / Önlisans (Kontrol)", yeni_mi, "ok_dinamik"
@@ -418,54 +484,4 @@ def main() -> None:
 
     for idx, ilan in enumerate(tekil_ilanlar, 1):
         baslik = ilan.get("title", "")
-        link = ilan.get("link", "")
-        kaynak = ilan.get("source", "Kamu Portalı")
-
-        ilan_id = generate_id(link if link else baslik)
-        if ilan_id in sent_ids:
-            continue
-
-        detay = ilan_detay_getir(link) if link else ""
-        uygun_mu, aciklama, hedef_profil, yeni_mi, sebep = ilan_analiz_et(baslik, detay, bugun)
-
-        if not uygun_mu:
-            continue
-
-        yeni_etiket = " 🚨 <b>[YENİ ALIM]</b>" if yeni_mi else ""
-        logging.info(f"[{idx}/{len(tekil_ilanlar)}] ({kaynak}) [{hedef_profil}] AKTİF BAŞVURU -> {baslik}")
-
-        clean_title = html.escape(baslik)
-        clean_aciklama = html.escape(aciklama)
-        clean_kaynak = html.escape(kaynak)
-        clean_profil = html.escape(hedef_profil)
-
-        if link:
-            item_str = (
-                f"• [{clean_kaynak}] 🎯 <b>[{clean_profil}]</b>{yeni_etiket}\n"
-                f"  <a href='{html.escape(link, quote=True)}'><b>{clean_title}</b></a>\n"
-                f"  📌 <i>{clean_aciklama}</i>"
-            )
-        else:
-            item_str = (
-                f"• [{clean_kaynak}] 🎯 <b>[{clean_profil}]</b>{yeni_etiket}\n"
-                f"  <b>{clean_title}</b>\n"
-                f"  📌 <i>{clean_aciklama}</i>"
-            )
-
-        yeni_green.append(item_str)
-        new_sent_ids.add(ilan_id)
-
-    if yeni_green:
-        sent_success = send_telegram_messages(yeni_green)
-        if sent_success:
-            save_sent_ids(new_sent_ids)
-            logging.info("Yeni ve aktif başvuru ilanları Telegram üzerinden bildirildi.")
-        else:
-            logging.error("Telegram bildirimi sırasında hata oluştu.")
-    else:
-        logging.info("Kriterlerinize uyan yeni veya aktif başvuru ilanı bulunamadı.")
-
-    logging.info("Tarama tamamlandı.")
-
-if __name__ == "__main__":
-    main()
+  
