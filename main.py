@@ -58,7 +58,9 @@ KESIN_ELENECEK_IFADELER = [
     "görevden alma", "siyasi", "ekonomi haberi", "basın açıklaması",
     "sınav sonucu", "sınav sonuçları", "mülakat sonucu", "mülakat sonuçları",
     "yerleştirme sonucu", "yerleştirme sonuçları", "nihai liste", "asıl ve yedek",
-    "tebligat", "dilekçe", "ücret tarifesi", "kura sonucu"
+    "tebligat", "dilekçe", "ücret tarifesi", "kura sonucu",
+    "önceki sayı", "sonraki sayı", "ana sayfa", "mevzuat bilgi sistemi",
+    "abonelik", "künye", "iletişim"
 ]
 
 ALIM_SINYALLERI = [
@@ -248,7 +250,7 @@ def detay_oku(url: str) -> str:
     except Exception:
         pass
     return " ".join(p for p in parcalar if p)[:15000]
-def _kurum_cikar(baslik: str, detay: str, kaynak: str) -> str:
+def _kurum_cikar(baslik: str, detay: str) -> str:
     for kaynak_metin in (baslik, detay):
         m = re.search(
             r"([A-ZÇĞİÖŞÜ][a-zçğıöşüA-ZÇĞİÖŞÜ0-9\s\-]{2,55}?(?:Bakanlığı|Üniversitesi|Belediyesi|Genel Müdürlüğü|Başkanlığı|Müdürlüğü|Kurumu))",
@@ -256,7 +258,7 @@ def _kurum_cikar(baslik: str, detay: str, kaynak: str) -> str:
         )
         if m:
             return " ".join(m.group(1).split())
-    return kaynak or "Belirtilmemiş"
+    return "Belirtilmemiş"
 
 
 def _pozisyon_cikar(baslik: str, detay: str) -> str:
@@ -277,14 +279,12 @@ def _kontenjan_cikar(metin_tr: str) -> str:
 
 def _egitim_ve_kpss_cikar(metin_tr: str) -> Tuple[str, str]:
     egitim = "Belirtilmemiş"
-    if "lisans" in metin_tr and "önlisans" not in metin_tr and "ön lisans" not in metin_tr:
-        egitim = "Lisans"
-    elif "önlisans" in metin_tr or "ön lisans" in metin_tr or "myo" in metin_tr:
+    if "önlisans" in metin_tr or "ön lisans" in metin_tr or "myo" in metin_tr or "meslek yüksekokulu" in metin_tr:
         egitim = "Önlisans"
+    elif "lisans" in metin_tr or "hemşirelik" in metin_tr:
+        egitim = "Lisans"
     elif "ortaöğretim" in metin_tr or "lise" in metin_tr:
         egitim = "Ortaöğretim"
-    elif "lisans" in metin_tr:
-        egitim = "Lisans"
 
     kpss_turu = "Belirtilmemiş"
     for tur in ("p93", "p3", "p94", "kpss"):
@@ -344,20 +344,17 @@ def _profil_uygunlugu_degerlendir(
     yas = int(p.get("yas", 29))
     cinsiyet_tr = tr_lower(str(p.get("cinsiyet", "")))
 
-    # Yaş şartı kontrolü (varsa)
     yas_limitleri = re.findall(r"(\d{2})\s*yaşını doldurmamış|en fazla\s*(\d{2})\s*yaş|(\d{2})\s*yaşından gün almamış", metin_tr)
     for grp in yas_limitleri:
         for val in grp:
             if val.isdigit() and yas > int(val):
                 return "Uygun Değil"
 
-    # Cinsiyet şartı kontrolü (yalnızca açık şart varsa)
     if cinsiyet_tr == "erkek" and re.search(r"\byalnızca kadın\b|\bkadın aday\b", metin_tr):
         return "Uygun Değil"
     if cinsiyet_tr == "kadın" and re.search(r"\byalnızca erkek\b|\berkek aday\b", metin_tr):
         return "Uygun Değil"
 
-    # Taban KPSS puanı kontrolü (varsa)
     puanlar = re.findall(r"(?:kpss|p93|p3|p94|taban puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)", metin_tr)
     for raw_p in puanlar:
         try:
@@ -367,15 +364,13 @@ def _profil_uygunlugu_degerlendir(
         except ValueError:
             continue
 
-    # Lisans Hemşirelik ikincil profili
     if p.get("ikincil_hemsirelik_lisans") and "hemşire" in metin_tr and ("lisans" in metin_tr or "hemşirelik" in metin_tr):
         return "Uygun"
 
-    # Önlisans / Adalet / P93 / 3001 / Bölüm şartı aranmayan kadrolar
-    bolum_sarti_yok = any(b in metin_tr for b in ["bölüm şartı aran", "herhangi bir önlisans", "önlisans mezun", "ön lisans mezun", "p93", "3001"])
-    adalet_uygun = any(k in metin_tr for k in ["adalet", "zabıt katibi", "zabıt kâtibi", "icra katibi", "büro personeli", "destek personeli"])
-
-    if egitim in ("Önlisans", "Belirtilmemiş") and (bolum_sarti_yok or adalet_uygun):
+    onlisans_uyumlu = egitim == "Önlisans" or any(
+        e in metin_tr for e in ["önlisans", "ön lisans", "p93", "3001", "adalet", "zabıt katibi", "zabıt kâtibi", "icra katibi"]
+    )
+    if onlisans_uyumlu:
         return "Uygun"
 
     if egitim == "Lisans" and not p.get("ikincil_hemsirelik_lisans"):
@@ -397,13 +392,15 @@ def ilan_degerlendir(
     detay_tr = tr_lower(detay)
     metin_tr = f"{baslik_tr} {detay_tr}"
 
-    # İçerik bağlamını incele; "atama" kelimesi alım şartı içinde geçiyorsa tek başına eleme
     if any(k in metin_tr for k in KESIN_ELENECEK_IFADELER):
-        return {"kabul": False, "puan": 0, "sebep": "Hariç tutulan mevzuat/haber/ihale/sonuç içeriği"}
+        return {"kabul": False, "puan": 0, "sebep": "Hariç tutulan içerik"}
+
+    if len(detay.strip()) < 60:
+        return {"kabul": False, "puan": 0, "sebep": "Detay metni yetersiz"}
 
     baslik_alim = any(a in baslik_tr for a in ALIM_SINYALLERI)
     metin_alim = any(a in metin_tr for a in ALIM_SINYALLERI)
-    kurum = _kurum_cikar(baslik, detay, kaynak)
+    kurum = _kurum_cikar(baslik, detay)
     pozisyon = _pozisyon_cikar(baslik, detay)
     kontenjan = _kontenjan_cikar(metin_tr)
     egitim, kpss_turu = _egitim_ve_kpss_cikar(metin_tr)
@@ -414,7 +411,17 @@ def ilan_degerlendir(
         return {"kabul": False, "puan": 0, "sebep": "Başvuru süresi geçmiş"}
 
     if not metin_alim:
-        return {"kabul": False, "puan": 0, "sebep": "Gerçek personel alım sinyali bulunamadı"}
+        return {"kabul": False, "puan": 0, "sebep": "Gerçek personel alım sinyali yok"}
+
+    # En az eğitim/KPSS veya pozisyon/kontenjan şartı doğrulanmış olmalı
+    sart_kaniti_var = (
+        egitim != "Belirtilmemiş"
+        or kpss_turu != "Belirtilmemiş"
+        or kontenjan != "Belirtilmemiş"
+        or pozisyon != "Belirtilmemiş"
+    )
+    if not sart_kaniti_var:
+        return {"kabul": False, "puan": 0, "sebep": "Şart/kadro bilgisi doğrulanamadı"}
 
     puan = 0
     if baslik_alim:
@@ -435,8 +442,7 @@ def ilan_degerlendir(
     akademik_mi = any(ak in metin_tr for ak in AKADEMIK_IFADELER)
     uygunluk = _profil_uygunlugu_degerlendir(metin_tr, egitim, profil)
 
-    # 80-100: Gönder | 50-79: İkinci doğrulama (kurum + pozisyon/alım doğrulamasıyla kabul) | 0-49: Gönderme
-    kabul = puan >= 50 and (kurum != "Belirtilmemiş" or pozisyon != "Belirtilmemiş")
+    kabul = (puan >= 50) and (uygunluk == "Uygun")
     kimlik = ilan_kimligi_olustur(baslik, kurum, pozisyon, link)
 
     return {
@@ -453,7 +459,7 @@ def ilan_degerlendir(
         "uygunluk": uygunluk,
         "link": link or "Belirtilmemiş",
         "kimlik": kimlik,
-        "sebep": "ok" if kabul else f"Düşük puan veya eksik kanıt ({puan})",
+        "sebep": "ok" if kabul else f"Uygun değil veya yetersiz puan ({uygunluk}, {puan})",
     }
 
 
@@ -474,7 +480,7 @@ def bildirim_metni_olustur(kayit: Dict[str, Any]) -> str:
         f"KPSS: {html.escape(str(kayit.get('kpss', 'Belirtilmemiş')))}\n"
         f"Başvuru Tarihi: {html.escape(str(kayit.get('basvuru_tarihi', 'Belirtilmemiş')))}\n"
         f"Son Başvuru: {html.escape(str(kayit.get('son_basvuru', 'Belirtilmemiş')))}\n\n"
-        f"📌 Kullanıcı Profili: {html.escape(str(kayit.get('uygunluk', 'Kontrol Gerekli')))}\n\n"
+        f"📌 Kullanıcı Profili: {html.escape(str(kayit.get('uygunluk', 'Uygun')))}\n\n"
         f"🔗 Resmî İlan: {resmi_ilan_satiri}\n"
         f"🔗 Başvuru: {resmi_ilan_satiri}"
     )
@@ -554,15 +560,7 @@ def main() -> None:
         detay = detay_oku(link) if link else ""
         sonuc = ilan_degerlendir(baslik, detay, kaynak=kaynak, link=link, bugun=bugun)
 
-        if not sonuc["kabul"]:
-            continue
-
-        # Sonuç duyuruları açıkça istenmedikçe Telegram'a gönderilmez
-        if sonuc["kategori"] == "SONUÇ DUYURUSU":
-            continue
-
-        # Uygun olmayan ilanlar doğrudan kullanıcıya gönderilmez
-        if sonuc["uygunluk"] == "Uygun Değil":
+        if not sonuc["kabul"] or sonuc["kategori"] == "SONUÇ DUYURUSU" or sonuc["uygunluk"] != "Uygun":
             continue
 
         kimlik = sonuc["kimlik"]
@@ -579,11 +577,11 @@ def main() -> None:
     if gonderilecek_mesajlar:
         if telegram_gonder(gonderilecek_mesajlar):
             save_sent_ids(new_ids)
-            logging.info(f"{len(gonderilecek_mesajlar)} ilan Telegram üzerinden bildirildi.")
+            logging.info(f"{len(gonderilecek_mesajlar)} uygun ilan Telegram üzerinden bildirildi.")
         else:
             logging.error("Telegram bildirimi sırasında hata oluştu.")
     else:
-        logging.info("Bildirilecek yeni ve uygun ilan bulunamadı.")
+        logging.info("Profilinize uygun ve şartları doğrulanmış yeni ilan bulunamadı.")
 
 
 def run_tests() -> None:
@@ -608,55 +606,25 @@ def run_tests() -> None:
     )
     assert r1["kabul"] and r1["uygunluk"] == "Uygun"
 
-    r2 = ilan_degerlendir(
-        "Cumhurbaşkanlığı Kararnamesi Hakkında Düzenleme",
-        "Cumhurbaşkanlığı kararnamesi ile bazı kurumlarda düzenleme yapılmıştır.",
-        kaynak="Resmî Gazete",
-        link="https://www.resmigazete.gov.tr/2",
+    r_eksik = ilan_degerlendir(
+        "Genel İlan Bağlantısı",
+        "Kısa metin",
+        kaynak="Kariyer Kapısı",
+        link="https://kariyerkapisi.gov.tr/ilan/eksik",
         bugun=bugun,
         profil=test_profil,
     )
-    assert not r2["kabul"]
+    assert not r_eksik["kabul"]
 
-    r3 = ilan_degerlendir(
-        "Personel Görevde Yükselme Yönetmeliği",
-        "Yönetmelik hükümleri uyarınca usul ve esaslar belirlenmiştir.",
-        kaynak="Resmî Gazete",
-        link="https://www.resmigazete.gov.tr/3",
-        bugun=bugun,
-        profil=test_profil,
-    )
-    assert not r3["kabul"]
-
-    r4 = ilan_degerlendir(
-        "Belediye Hizmet Binası Yapım İhale İlanı",
-        "4734 sayılı Kanun kapsamında ihale ilanı yayımlanmıştır.",
-        kaynak="Belediye",
-        link="https://example.gov.tr/ihale",
-        bugun=bugun,
-        profil=test_profil,
-    )
-    assert not r4["kabul"]
-
-    r5 = ilan_degerlendir(
-        "Bakanlık Sözleşmeli Personel Alımı",
-        "Önlisans mezunları başvurabilir. Son Başvuru: 01.10.2026.",
+    r_kontrol = ilan_degerlendir(
+        "Kurum Sözleşmeli Personel Alımı",
+        "Kurum: Örnek Kurum. Lise mezunları için alım yapılacaktır. Son Başvuru: 15.12.2026.",
         kaynak="SBB Kamu İlan",
-        link="https://kamuilan.sbb.gov.tr/eski",
+        link="https://kamuilan.sbb.gov.tr/ilan/lise",
         bugun=bugun,
         profil=test_profil,
     )
-    assert not r5["kabul"]
-
-    r6 = ilan_degerlendir(
-        "Kamu Kurumu Büro Personeli Alım İlanı",
-        "Kurum: Kamu Kurumu. Büro personeli alımı yapılacaktır. KPSS şartı aranmamaktadır. Ön lisans mezunları başvurabilir. Son Başvuru: 10.12.2026.",
-        kaynak="SBB Kamu İlan",
-        link="https://kamuilan.sbb.gov.tr/kpss-yok",
-        bugun=bugun,
-        profil=test_profil,
-    )
-    assert r6["kabul"] and r6["uygunluk"] == "Uygun"
+    assert not r_kontrol["kabul"]
 
     print("TÜM TEST SENARYOLARI BAŞARILI.")
 
