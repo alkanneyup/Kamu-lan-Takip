@@ -138,7 +138,7 @@ def resmi_gazete_getir() -> List[Dict[str, str]]:
     base_url = "https://www.resmigazete.gov.tr/"
     seen: Set[str] = set()
     try:
-        res = requests.get(base_url, headers=HEADERS, timeout=(5, 10), allow_redirects=True)
+        res = requests.get(base_url, headers=HEADERS, timeout=(4, 7), allow_redirects=True)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
             for a_tag in soup.find_all("a", href=True):
@@ -189,61 +189,35 @@ def _sbb_oturum_olustur() -> requests.Session:
 def sbb_kamu_ilan_getir() -> List[Dict[str, str]]:
     ilanlar: List[Dict[str, str]] = []
     base_url = "https://kamuilan.sbb.gov.tr/"
-    aday_yollar = [
-        base_url,
-        urljoin(base_url, "ilanlar"),
-        urljoin(base_url, "tum-ilanlar"),
-    ]
     seen: Set[str] = set()
     session = _sbb_oturum_olustur()
 
     try:
-        ilk_res = session.get(base_url, timeout=(6, 12), allow_redirects=True)
-        if ilk_res.status_code == 403:
-            logging.warning(
-                "SBB Kamu İlan HTTP 403 döndü (WAF/IP/TLS veya tarayıcı doğrulaması engelliyor)."
-            )
+        res = session.get(base_url, timeout=(5, 9), allow_redirects=True)
+        if res.status_code != 200:
+            logging.warning(f"SBB Kamu İlan HTTP {res.status_code} döndü.")
             return ilanlar
 
-        session.headers.update({
-            "Referer": ilk_res.url or base_url,
-            "Sec-Fetch-Site": "same-origin",
-        })
-
-        for hedef_url in aday_yollar:
-            try:
-                res = (
-                    ilk_res
-                    if hedef_url == base_url
-                    else session.get(hedef_url, timeout=(6, 12), allow_redirects=True)
-                )
-                if res.status_code != 200:
-                    logging.warning(f"SBB Kamu İlan ({hedef_url}) HTTP {res.status_code} döndü.")
-                    continue
-
-                soup = BeautifulSoup(res.text, "html.parser")
-                for a_tag in soup.find_all("a", href=True):
-                    href = (a_tag.get("href") or "").strip()
-                    title = " ".join(a_tag.get_text(" ", strip=True).split())
-                    if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
-                        continue
-                    if len(title) < 10 or len(title) > 200:
-                        continue
-                    title_tr = tr_lower(title)
-                    if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
-                        continue
-                    if any(k in title_tr for k in BASVURU_ILANI_IFADELERI):
-                        full_link = urljoin(res.url, href)
-                        if full_link not in seen:
-                            seen.add(full_link)
-                            ilanlar.append({
-                                "title": title,
-                                "link": full_link,
-                                "source": "SBB Kamu İlan",
-                            })
-            except Exception as inner_err:
-                logging.debug(f"SBB alt yol kontrol edilemedi ({hedef_url}): {inner_err}")
-
+        soup = BeautifulSoup(res.text, "html.parser")
+        for a_tag in soup.find_all("a", href=True):
+            href = (a_tag.get("href") or "").strip()
+            title = " ".join(a_tag.get_text(" ", strip=True).split())
+            if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+            if len(title) < 10 or len(title) > 200:
+                continue
+            title_tr = tr_lower(title)
+            if any(k in title_tr for k in HABER_VE_KALABALIK_IFADELERI):
+                continue
+            if any(k in title_tr for k in BASVURU_ILANI_IFADELERI):
+                full_link = urljoin(res.url, href)
+                if full_link not in seen:
+                    seen.add(full_link)
+                    ilanlar.append({
+                        "title": title,
+                        "link": full_link,
+                        "source": "SBB Kamu İlan",
+                    })
     except Exception as e:
         logging.error(f"SBB Kamu İlan hatası: {e}")
     finally:
@@ -256,7 +230,7 @@ def kariyer_kapisi_getir() -> List[Dict[str, str]]:
     seen: Set[str] = set()
 
     try:
-        res = requests.get("https://kariyerkapisi.gov.tr/RSS", headers=HEADERS, timeout=(5, 10))
+        res = requests.get("https://kariyerkapisi.gov.tr/RSS", headers=HEADERS, timeout=(4, 7))
         if res.status_code == 200:
             root = ET.fromstring(res.content)
             for item in root.findall("./channel/item"):
@@ -270,7 +244,7 @@ def kariyer_kapisi_getir() -> List[Dict[str, str]]:
         logging.error(f"Kariyer Kapısı RSS hatası: {e}")
 
     try:
-        res = requests.get("https://kariyerkapisi.gov.tr/", headers=HEADERS, timeout=(5, 10), allow_redirects=True)
+        res = requests.get("https://kariyerkapisi.gov.tr/", headers=HEADERS, timeout=(4, 7), allow_redirects=True)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
             for a_tag in soup.find_all("a", href=True):
@@ -320,7 +294,7 @@ def ilan_detay_getir(url: str) -> str:
                     f"https://kariyerkapisi.gov.tr/IlanDetay/Getir?id={guid}"
                 ]:
                     try:
-                        res = requests.get(api_url, headers=HEADERS, timeout=(4, 8))
+                        res = requests.get(api_url, headers=HEADERS, timeout=(3, 5))
                         if res.status_code == 200:
                             try:
                                 data = res.json()
@@ -333,7 +307,7 @@ def ilan_detay_getir(url: str) -> str:
                     except Exception:
                         continue
 
-        res = requests.get(url, headers=HEADERS, timeout=(4, 8), allow_redirects=True)
+        res = requests.get(url, headers=HEADERS, timeout=(3, 5), allow_redirects=True)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
             script_metinleri: List[str] = []
@@ -347,7 +321,7 @@ def ilan_detay_getir(url: str) -> str:
             clean_text = " ".join(soup.get_text(" ", strip=True).split())
             parcalar.append(clean_text)
             if len(clean_text) < 300 and script_metinleri:
-                parcalar.append(" ".join(script_metinleri)[:6000])
+                parcalar.append(" ".join(script_metinleri)[:5000])
     except Exception as e:
         logging.debug(f"İlan detayı çekilemedi ({url}): {e}")
 
@@ -396,6 +370,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
     if not aktif_mi:
         return False, "", "", False, "başvuru süresi geçmiş"
 
+    # 1. Lisans Hemşirelik
     hemsire_baslikta_veya_kadrosunda = (
         "hemşire" in baslik_tr
         or bool(re.search(r"(?:alımı|alacak|alacaktır|kadrosu|unvanlı)\b[^.]{0,80}\bhemşire\b", detay_tr))
@@ -403,6 +378,7 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
     if hemsire_baslikta_veya_kadrosunda and any(k in metin_tr for k in ["lisans", "hemşirelik"]):
         return True, f"Lisans Hemşirelik başvuru ilanı. {deadline_str}", "Hemşirelik (Lisans)", yeni_mi, "ok"
 
+    # 2. Adalet / Önlisans / P93 / 3001 / Büro Personeli
     adalet_zorunlu_kelimeler = [
         "adalet", "zabıt katibi", "katip", "mübaşir", "icra katibi",
         "infaz koruma", "3001", "önlisans programlarının", "ön lisans programlarının",
@@ -411,26 +387,13 @@ def ilan_analiz_et(baslik: str, detay_metni: str, bugun: date) -> Tuple[bool, st
 
     buro_ve_onlisans = (
         any(b in metin_tr for b in ["büro personeli", "büro destek", "koruma ve güvenlik", "destek personeli"])
-        and any(e in metin_tr for e in ["önlisans", "ön lisans", "myo", "meslek yüksekokulu", "p93"])
+        and any(e in metin_tr for e in ["önlisans", "ön lisans", "myo", "meslek yüksekokulu", "2 yıllık", "p93"])
     )
 
     if any(k in metin_tr for k in adalet_zorunlu_kelimeler) or buro_ve_onlisans:
-        kpss_matches = re.findall(r"(?:kpss|p93|p3|p94|puan)\D*([5-9][0-9](?:[\.,][0-9]+)?)", metin_tr)
-        for match in kpss_matches:
-            try:
-                req_score = float(match.replace(",", "."))
-                if 50.0 <= req_score <= 100.0:
-                    if USER_PROFILE["kpss"] < req_score:
-                        return False, "", "", False, f"kpss yetersiz ({req_score})"
-            except ValueError:
-                continue
-        return True, f"Adalet / Önlisans başvuru ilanı. {deadline_str}", "Adalet (Önlisans)", yeni_mi, "ok"
-
-    if len(detay_metni.strip()) < 300 and any(kurum in baslik_tr for kurum in ["üniversite", "belediye"]):
-        if any(alim in baslik_tr for alim in ["sözleşmeli personel alım", "personel alım", "memur alım", "alım ilanı"]):
-            return True, f"Üniversite/Belediye başvuru ilanı (detay tablosu dinamik). {deadline_str}", "Adalet / Önlisans (Kontrol)", yeni_mi, "ok_dinamik"
-
-    return False, "", "", False, f"profil eşleşmedi (detay_len={len(detay_metni)})"
+        puan_satirlari = re.findall(
+            r"(?:p93|önlisans|ön lisans|adalet)[^.\n]{0,80}?([5-9][0-9](?:[\.,][0-9]+)?)",
+            metin_tr
 def main() -> None:
     bugun = datetime.now().date()
     logging.info("============================================================")
