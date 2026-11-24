@@ -96,7 +96,6 @@ def _zlib_metin_cikar(raw_pdf: bytes) -> str:
             try:
                 acilmis = zlib.decompress(akış, wbits)
                 txt = acilmis.decode("latin-1", errors="ignore")
-                # PDF metin operatörleri (...) ve TJ/Tj dizilerindeki metinleri yakala
                 parantez_ici = re.findall(r"\(([^()\\]{2,200})\)", txt)
                 if parantez_ici:
                     parcalar.append(" ".join(parantez_ici))
@@ -135,8 +134,8 @@ def _pdf_linkleri_bul(metin_veya_html: str, base_url: str = "") -> List[str]:
             bulunan.append(full)
     return list(dict.fromkeys(bulunan))
 
-def detay_oku(url: str) -> str:
-    if not url: return ""
+def detay_oku(url: str) -> Tuple[str, int]:
+    if not url: return "", 0
     parcalar: List[str] = []
     pdf_linkler: List[str] = []
     try:
@@ -180,11 +179,13 @@ def detay_oku(url: str) -> str:
             parcalar.append(" ".join(soup.get_text(" ", strip=True).split()))
             if tablo_satirlari: parcalar.append(" ; ".join(x for x in tablo_satirlari if x.strip()))
             if script_metinleri: parcalar.append(" ".join(x for x in script_metinleri if x.strip())[:5000])
-        for p_url in list(dict.fromkeys(pdf_linkler))[:3]:
+        benzersiz_pdf = list(dict.fromkeys(pdf_linkler))
+        for p_url in benzersiz_pdf[:3]:
             pdf_txt = _pdf_metin_oku(p_url)
             if pdf_txt: parcalar.append(pdf_txt)
-    except Exception: pass
-    return " ".join(p for p in parcalar if p)[:20000]
+        return " ".join(p for p in parcalar if p)[:20000], len(benzersiz_pdf)
+    except Exception:
+        return " ".join(p for p in parcalar if p)[:20000], len(list(dict.fromkeys(pdf_linkler)))
 def _bilgi_cikar(baslik: str, detay: str, bugun: date) -> Dict[str, Any]:
     metin = tr_lower(f"{baslik} {detay}")
     kurum = "Belirtilmemiş"
@@ -267,12 +268,13 @@ def main() -> None:
     mesajlar, gorulen_kimlik, sayac = [], set(), Counter()
     for ilan in tekil:
         baslik, link, kaynak = ilan.get("title", ""), ilan.get("link", ""), ilan.get("source", "Kamu")
-        sonuc = ilan_degerlendir(baslik, detay_oku(link) if link else "", kaynak=kaynak, link=link, bugun=bugun)
+        detay, pdf_sayisi = detay_oku(link) if link else ("", 0)
+        sonuc = ilan_degerlendir(baslik, detay, kaynak=kaynak, link=link, bugun=bugun)
         if not sonuc["kabul"]:
             sebep = sonuc["sebep"]
             sayac[sebep] += 1
             if sebep == "Şart/kadro bilgisi doğrulanamadı" or "Kontrol Gerekli" in sebep:
-                logging.info(f"[ADAY LOG] ({kaynak}) {baslik} | Eğitim={sonuc.get('egitim', '-')} | KPSS={sonuc.get('kpss', '-')} | Pozisyon={sonuc.get('pozisyon', '-')} | Sebep={sebep}")
+                logging.info(f"[ADAY LOG] ({kaynak}) {baslik} | DetayUz={len(detay)} | PDF={pdf_sayisi} | Eğitim={sonuc.get('egitim', '-')} | KPSS={sonuc.get('kpss', '-')} | Pozisyon={sonuc.get('pozisyon', '-')} | Sebep={sebep}")
             continue
         if sonuc["kimlik"] in sent_ids or sonuc["kimlik"] in gorulen_kimlik: sayac["Tekrar / kayıtlı"] += 1; continue
         gorulen_kimlik.add(sonuc["kimlik"]); new_ids.add(sonuc["kimlik"])
