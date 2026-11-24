@@ -100,8 +100,7 @@ def _pdf_metin_oku(pdf_url: str) -> str:
             if len(metin.strip()) > 30:
                 return " ".join(metin.split())[:10000]
         except Exception: pass
-        # pypdf yoksa veya metin çıkarılamazsa PDF içindeki okunabilir metin parçalarını ayıkla
-        ham = re.findall(rb"[A-Za-zÇĞİÖŞÜçğıöşü0-9\s\.\,\:\;\-\/\(\)\%]{4,}", r.content)
+        ham = re.findall(rb"[A-Za-z0-9\s\.\,\:\;\-\/\(\)\%]{4,}", r.content)
         temiz = " ".join(x.decode("utf-8", errors="ignore") for x in ham)
         return " ".join(temiz.split())[:6000]
     except Exception:
