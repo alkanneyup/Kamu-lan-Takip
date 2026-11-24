@@ -2,43 +2,65 @@ import logging
 import requests
 import xml.etree.ElementTree as ET
 from typing import List, Dict
+from urllib.parse import urljoin
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "tr-TR,tr;q=0.9"
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    "Accept-Language": "tr-TR,tr;q=0.9",
 }
 
-def iskur_ilanlarini_getir() -> List[Dict[str, str]]:
-    """İŞKUR kamu ilanlarını RSS/API kaynaklarından güvenli bir biçimde çeker."""
-    ilanlar: List[Dict[str, str]] = []
-    
-    iskur_urls = [
-        "https://esube.iskur.gov.tr/Rss/Ilanlar.aspx?tur=kamu",
-        "https://www.iskur.gov.tr/rss/kamu-ilanlari"
-    ]
+RSS_URLS = [
+    "https://esube.iskur.gov.tr/Rss/Ilanlar.aspx?tur=kamu",
+    "https://www.iskur.gov.tr/rss/kamu-ilanlari",
+]
 
-    for url in iskur_urls:
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=10)
-            if response.status_code == 200 and len(response.content) > 100:
+def iskur_ilanlarini_getir() -> List[Dict[str, str]]:
+    """İŞKUR kamu RSS kaynaklarını sırayla dener; yinelenen kayıtları ayıklar."""
+    ilanlar: List[Dict[str, str]] = []
+    gorulen = set()
+
+    with requests.Session() as session:
+        session.headers.update(HEADERS)
+        for url in RSS_URLS:
+            try:
+                response = session.get(url, timeout=(6, 15), allow_redirects=True)
+                if response.status_code != 200 or len(response.content) < 50:
+                    logging.warning("[İŞKUR RSS] HTTP %s: %s", response.status_code, url)
+                    continue
+
                 try:
                     root = ET.fromstring(response.content)
-                    for item in root.findall('./channel/item'):
-                        title = item.find('title').text if item.find('title') is not None else ''
-                        link = item.find('link').text if item.find('link') is not None else ''
-                        
-                        if title:
-                            ilanlar.append({
-                                'title': title.strip(),
-                                'link': link.strip() if link else '',
-                                'source': 'İŞKUR Kamu'
-                            })
-                    if ilanlar:
-                        break
-                except ET.ParseError:
-                    logging.debug(f"İŞKUR RSS XML Ayrıştırma hatası ({url})")
-        except Exception as e:
-            logging.debug(f"İŞKUR RSS Bağlantı hatası ({url}): {e}")
+                except ET.ParseError as exc:
+                    logging.warning("[İŞKUR RSS] XML ayrıştırılamadı (%s): %s", url, exc)
+                    continue
+
+                items = root.findall(".//item")
+                for item in items:
+                    title = (item.findtext("title") or "").strip()
+                    link = (item.findtext("link") or "").strip()
+                    if not title:
+                        continue
+                    if link:
+                        link = urljoin(response.url, link)
+                    key = (link or title).split("#")[0].rstrip("/")
+                    if key in gorulen:
+                        continue
+                    gorulen.add(key)
+                    ilanlar.append({
+                        "title": title,
+                        "link": link,
+                        "source": "İŞKUR Kamu",
+                    })
+
+                if ilanlar:
+                    logging.info("[İŞKUR RSS] %s ilan alındı: %s", len(ilanlar), url)
+                    break
+
+            except requests.RequestException as exc:
+                logging.warning("[İŞKUR RSS] Bağlantı hatası (%s): %s", url, exc)
 
     return ilanlar
