@@ -153,7 +153,7 @@ def ilan_degerlendir(baslik: str, detay: str, kaynak: str = "Kamu", link: str = 
     info = _bilgi_cikar(baslik, detay, ref)
     if info["son_dt"] and info["son_dt"] < ref: return {"kabul": False, "sebep": "Başvuru süresi geçmiş"}
     if not any(info[k] != "Belirtilmemiş" for k in ("egitim", "kpss", "kontenjan", "pozisyon")):
-        return {"kabul": False, "sebep": "Şart/kadro bilgisi doğrulanamadı"}
+        return {"kabul": False, "sebep": "Şart/kadro bilgisi doğrulanamadı", **info}
     puan = (30 if any(a in b_tr for a in ALIM) else 0) + (15 if info["kurum"] != "Belirtilmemiş" or any(k in metin for k in KURUMLAR) else 0) + (15 if info["pozisyon"] != "Belirtilmemiş" else 0) + (10 if info["kontenjan"] != "Belirtilmemiş" else 0) + (10 if info["kpss"] != "Belirtilmemiş" or "kpss" in metin else 0) + (10 if info["bas"] != "Belirtilmemiş" or info["son"] != "Belirtilmemiş" else 0) + (10 if link.startswith(("http://", "https://")) else 0)
     uygunluk = _uygunluk_bak(metin, info["egitim"], p)
     kabul = puan >= 50 and uygunluk == "Uygun"
@@ -181,7 +181,8 @@ def telegram_gonder(items: List[str]) -> bool:
 def main() -> None:
     bugun = datetime.now().date()
     logging.info(f"KAMU İLAN TAKİP BAŞLADI ({bugun})")
-    sent_ids, new_ids = load_sent_ids(), set(load_sent_ids())
+    sent_ids = load_sent_ids()
+    new_ids = set(sent_ids)
     tekil, gorulen = [], set()
     for a in kaynaklari_topla():
         uid = md5_id(a.get("link") or a.get("title", ""))
@@ -191,7 +192,12 @@ def main() -> None:
     for ilan in tekil:
         baslik, link, kaynak = ilan.get("title", ""), ilan.get("link", ""), ilan.get("source", "Kamu")
         sonuc = ilan_degerlendir(baslik, detay_oku(link) if link else "", kaynak=kaynak, link=link, bugun=bugun)
-        if not sonuc["kabul"]: sayac[sonuc["sebep"]] += 1; continue
+        if not sonuc["kabul"]:
+            sebep = sonuc["sebep"]
+            sayac[sebep] += 1
+            if sebep == "Şart/kadro bilgisi doğrulanamadı" or "Kontrol Gerekli" in sebep:
+                logging.info(f"[ADAY LOG] ({kaynak}) {baslik} | Eğitim={sonuc.get('egitim', '-')} | KPSS={sonuc.get('kpss', '-')} | Pozisyon={sonuc.get('pozisyon', '-')} | Sebep={sebep}")
+            continue
         if sonuc["kimlik"] in sent_ids or sonuc["kimlik"] in gorulen_kimlik: sayac["Tekrar / kayıtlı"] += 1; continue
         gorulen_kimlik.add(sonuc["kimlik"]); new_ids.add(sonuc["kimlik"])
         logging.info(f"[{kaynak}] [{sonuc['kategori']}] [{sonuc['uygunluk']}] (Puan: {sonuc['puan']}) -> {baslik}")
