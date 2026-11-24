@@ -1,4 +1,4 @@
-import os, re, sys, json, html, hashlib, logging, requests
+import os, re, sys, json, html, hashlib, logging, requests, io
 import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import datetime, date
@@ -19,7 +19,7 @@ except Exception:
 USER_PROFILE = {"egitim": "Önlisans", "bolum": "Adalet", "puan_turu": "P93", "kpss": 80.86227, "cinsiyet": "Erkek", "yas": 29, "hemsire_lisans": True}
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"}
 
-HARIC = ["kararname", "kanun", "yönetmelik", "genelge", "tebliğ", "mahkeme", "yargıtay", "danıştay", "ihale", "kamulaştırma", "vergi", "görevden alma", "siyasi", "ekonomi haberi", "basın açıklaması", "sınav sonucu", "mülakat sonucu", "yerleştirme sonucu", "nihai liste", "asıl ve yedek", "tebligat", "dilekçe", "ücret tarifesi", "önceki sayı", "sonraki sayı", "ana sayfa", "mevzuat bilgi sistemi", "abonelik", "künye", "iletişim"]
+HARIC = ["kararname", "kanun", "yönetmelik", "genelge", "tebliğ", "mahkeme", "yargıtay", "danıştay", "ihale", "kamulaştırma", "vergi", "görevden alma", "siyasi", "ekonomi haberi", "basın açıklaması", "sınav sonucu", "mülakat sonucu", "yerleştirme sonucu", "nihai liste", "asıl ve yedek", "tebligat", "dilekçe", "ücret tarifesi", "sözlü sınav duyurusu", "giriş sınavı", "yazılı sınav duyurusu", "önceki sayı", "sonraki sayı", "ana sayfa", "mevzuat bilgi sistemi", "abonelik", "künye", "iletişim"]
 ALIM = ["personel alım", "memur alım", "sözleşmeli personel", "sürekli işçi", "geçici işçi", "işçi alımı", "kamu personeli", "personel temin", "alım ilanı", "alınacaktır", "alacak"]
 UNVANLAR = ["memur", "sözleşmeli personel", "sürekli işçi", "geçici işçi", "büro personeli", "destek personeli", "zabıt katibi", "zabıt kâtibi", "infaz ve koruma memuru", "infaz koruma", "icra memuru", "icra katibi", "vhki", "koruma ve güvenlik", "teknisyen", "tekniker", "mühendis", "şoför", "hizmetli", "hemşire", "öğretim görevlisi", "araştırma görevlisi"]
 KURUMLAR = ["bakanlığı", "bakanlık", "üniversitesi", "üniversite", "belediyesi", "belediye", "müdürlüğü", "başkanlığı", "genel müdürlüğü", "kurumu", "valiliği", "kaymakamlığı", "işkur"]
@@ -88,10 +88,32 @@ def _json_str(obj: Any) -> str:
     if isinstance(obj, list): return " ".join(_json_str(v) for v in obj)
     return ""
 
+def _pdf_metin_oku(pdf_url: str) -> str:
+    if not pdf_url: return ""
+    try:
+        r = requests.get(pdf_url, headers=HEADERS, timeout=(4, 7), allow_redirects=True)
+        if r.status_code != 200 or not r.content: return ""
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(r.content))
+            metin = " ".join((page.extract_text() or "") for page in reader.pages[:8])
+            if len(metin.strip()) > 30:
+                return " ".join(metin.split())[:10000]
+        except Exception: pass
+        # pypdf yoksa veya metin çıkarılamazsa PDF içindeki okunabilir metin parçalarını ayıkla
+        ham = re.findall(rb"[A-Za-zÇĞİÖŞÜçğıöşü0-9\s\.\,\:\;\-\/\(\)\%]{4,}", r.content)
+        temiz = " ".join(x.decode("utf-8", errors="ignore") for x in ham)
+        return " ".join(temiz.split())[:6000]
+    except Exception:
+        return ""
+
 def detay_oku(url: str) -> str:
     if not url: return ""
     parcalar: List[str] = []
+    pdf_linkler: List[str] = []
     try:
+        if ".pdf" in url.lower():
+            pdf_linkler.append(url)
         m = re.search(r"i=([a-f0-9-]+)", url, re.IGNORECASE)
         if m and "kariyerkapisi" in url:
             guid = m.group(1)
@@ -99,16 +121,34 @@ def detay_oku(url: str) -> str:
                 try:
                     ar = requests.get(api, headers=HEADERS, timeout=(3, 5))
                     if ar.status_code == 200:
-                        try: parcalar.append(_json_str(ar.json()))
-                        except Exception: parcalar.append(" ".join(html.unescape(re.sub(r"<[^>]+>", " ", ar.text)).split()))
+                        try:
+                            j_str = _json_str(ar.json())
+                            parcalar.append(j_str)
+                            pdf_linkler.extend(re.findall(r"https?://[^\s\"'<>]+\.pdf", j_str, re.IGNORECASE))
+                        except Exception:
+                            raw_t = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", ar.text)).split())
+                            parcalar.append(raw_t)
+                            pdf_linkler.extend(re.findall(r"https?://[^\s\"'<>]+\.pdf", raw_t, re.IGNORECASE))
                 except Exception: continue
         r = requests.get(url, headers=HEADERS, timeout=(3, 5), allow_redirects=True)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = urljoin(r.url, (a.get("href") or "").strip())
+                if ".pdf" in href.lower() or "ilan-metni" in href.lower():
+                    pdf_linkler.append(href)
+            pdf_linkler.extend(re.findall(r"https?://[^\s\"'<>]+\.pdf", r.text, re.IGNORECASE))
+            tablo_satirlari = [" | ".join(td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])) for tr in soup.find_all("tr")]
+            script_metinleri = [" ".join(html.unescape(re.sub(r"<[^>]+>", " ", s.string or s.get_text() or "")).split()) for s in soup.find_all("script")]
             for tag in soup(["script", "style", "nav", "header", "footer"]): tag.decompose()
             parcalar.append(" ".join(soup.get_text(" ", strip=True).split()))
+            if tablo_satirlari: parcalar.append(" ; ".join(x for x in tablo_satirlari if x.strip()))
+            if script_metinleri: parcalar.append(" ".join(x for x in script_metinleri if x.strip())[:4000])
+        for p_url in list(dict.fromkeys(pdf_linkler))[:2]:
+            pdf_txt = _pdf_metin_oku(p_url)
+            if pdf_txt: parcalar.append(pdf_txt)
     except Exception: pass
-    return " ".join(p for p in parcalar if p)[:15000]
+    return " ".join(p for p in parcalar if p)[:18000]
 def _bilgi_cikar(baslik: str, detay: str, bugun: date) -> Dict[str, Any]:
     metin = tr_lower(f"{baslik} {detay}")
     kurum = "Belirtilmemiş"
@@ -116,11 +156,11 @@ def _bilgi_cikar(baslik: str, detay: str, bugun: date) -> Dict[str, Any]:
         m = re.search(r"([A-ZÇĞİÖŞÜ][a-zçğıöşüA-ZÇĞİÖŞÜ0-9\s\-]{2,55}?(?:Bakanlığı|Üniversitesi|Belediyesi|Genel Müdürlüğü|Başkanlığı|Müdürlüğü|Kurumu))", src)
         if m: kurum = " ".join(m.group(1).split()); break
     pozisyon = next((u.title() for u in UNVANLAR if u in metin), "Belirtilmemiş")
-    km = re.search(r"(?:kontenjan|alınacak|kadro)\D{0,25}?(\d{1,4})\s*(?:kişi|personel|memur|işçi|adet)", metin)
+    km = re.search(r"(?:kontenjan|alınacak|kadro|adedi)\D{0,25}?(\d{1,4})\s*(?:kişi|personel|memur|işçi|adet|\|)", metin)
     kontenjan = f"{km.group(1)} kişi" if km else "Belirtilmemiş"
     egitim = "Önlisans" if any(x in metin for x in ["önlisans", "ön lisans", "myo", "meslek yüksekokulu"]) else ("Lisans" if any(x in metin for x in ["lisans", "hemşirelik"]) else ("Ortaöğretim" if any(x in metin for x in ["ortaöğretim", "lise"]) else "Belirtilmemiş"))
     kpss = next((t.upper() for t in ("p93", "p3", "p94", "kpss") if t in metin), "Belirtilmemiş")
-    bm = re.findall(r"(?:başvuru başlangıç|başvurular\D{0,20}?tarihinde)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})", detay, re.IGNORECASE)
+    bm = re.findall(r"(?:başvuru başlangıç|başvurular\D{0,25}?tarihinde)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})", detay, re.IGNORECASE)
     sm = re.findall(r"(?:son başvuru|son gün|başvuru bitiş|tarihine kadar)\D*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4})", detay, re.IGNORECASE)
     son_str, son_dt = "Belirtilmemiş", None
     if sm:
@@ -141,7 +181,7 @@ def _uygunluk_bak(metin: str, egitim: str, p: Dict[str, Any]) -> str:
             if 50.0 <= taban <= 100.0 and float(p["kpss"]) < taban: return "Uygun Değil"
         except ValueError: continue
     if p.get("hemsire_lisans") and "hemşire" in metin and ("lisans" in metin or "hemşirelik" in metin): return "Uygun"
-    if egitim == "Önlisans" or any(x in metin for x in ["önlisans", "ön lisans", "p93", "3001", "adalet", "zabıt katibi", "zabıt kâtibi", "icra katibi"]): return "Uygun"
+    if egitim == "Önlisans" or any(x in metin for x in ["önlisans", "ön lisans", "p93", "3001", "adalet", "büro personeli", "zabıt katibi", "zabıt kâtibi", "icra katibi"]): return "Uygun"
     return "Uygun Değil" if egitim == "Lisans" and not p.get("hemsire_lisans") else "Kontrol Gerekli"
 
 def ilan_degerlendir(baslik: str, detay: str, kaynak: str = "Kamu", link: str = "", bugun: Optional[date] = None, profil: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
