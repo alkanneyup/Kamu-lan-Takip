@@ -1,4 +1,4 @@
-import os, re, sys, json, html, hashlib, logging, requests, io
+import os, re, sys, json, html, hashlib, logging, requests, io, zlib
 import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import datetime, date
@@ -88,23 +88,52 @@ def _json_str(obj: Any) -> str:
     if isinstance(obj, list): return " ".join(_json_str(v) for v in obj)
     return ""
 
+def _zlib_metin_cikar(raw_pdf: bytes) -> str:
+    parcalar: List[str] = []
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", raw_pdf, re.DOTALL):
+        akış = m.group(1)
+        for wbits in (15, -15, 31):
+            try:
+                acilmis = zlib.decompress(akış, wbits)
+                txt = acilmis.decode("latin-1", errors="ignore")
+                # PDF metin operatörleri (...) ve TJ/Tj dizilerindeki metinleri yakala
+                parantez_ici = re.findall(r"\(([^()\\]{2,200})\)", txt)
+                if parantez_ici:
+                    parcalar.append(" ".join(parantez_ici))
+                duz = " ".join(re.findall(r"[A-Za-z0-9\s\.\,\:\;\-\/\(\)\%]{4,}", txt))
+                if duz:
+                    parcalar.append(duz)
+                break
+            except Exception:
+                continue
+    if not parcalar:
+        ham = re.findall(rb"[A-Za-z0-9\s\.\,\:\;\-\/\(\)\%]{4,}", raw_pdf)
+        parcalar.append(" ".join(x.decode("utf-8", errors="ignore") for x in ham))
+    return " ".join(" ".join(parcalar).split())[:12000]
+
 def _pdf_metin_oku(pdf_url: str) -> str:
     if not pdf_url: return ""
     try:
-        r = requests.get(pdf_url, headers=HEADERS, timeout=(4, 7), allow_redirects=True)
+        r = requests.get(pdf_url, headers=HEADERS, timeout=(4, 8), allow_redirects=True)
         if r.status_code != 200 or not r.content: return ""
         try:
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(r.content))
-            metin = " ".join((page.extract_text() or "") for page in reader.pages[:8])
+            metin = " ".join((page.extract_text() or "") for page in reader.pages[:10])
             if len(metin.strip()) > 30:
-                return " ".join(metin.split())[:10000]
+                return " ".join(metin.split())[:12000]
         except Exception: pass
-        ham = re.findall(rb"[A-Za-z0-9\s\.\,\:\;\-\/\(\)\%]{4,}", r.content)
-        temiz = " ".join(x.decode("utf-8", errors="ignore") for x in ham)
-        return " ".join(temiz.split())[:6000]
+        return _zlib_metin_cikar(r.content)
     except Exception:
         return ""
+
+def _pdf_linkleri_bul(metin_veya_html: str, base_url: str = "") -> List[str]:
+    bulunan: List[str] = []
+    for raw in re.findall(r"""(?:https?://[^\s"'<>()]+|/?[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>()]*)?)""", metin_veya_html, re.IGNORECASE):
+        full = urljoin(base_url, raw.strip()) if base_url else raw.strip()
+        if ".pdf" in full.lower() and full.startswith(("http://", "https://")):
+            bulunan.append(full)
+    return list(dict.fromkeys(bulunan))
 
 def detay_oku(url: str) -> str:
     if not url: return ""
@@ -113,41 +142,49 @@ def detay_oku(url: str) -> str:
     try:
         if ".pdf" in url.lower():
             pdf_linkler.append(url)
-        m = re.search(r"i=([a-f0-9-]+)", url, re.IGNORECASE)
-        if m and "kariyerkapisi" in url:
-            guid = m.group(1)
-            for api in [f"https://kariyerkapisi.gov.tr/RSS/IlanDetayGetir?id={guid}", f"https://kariyerkapisi.gov.tr/IlanDetay/Getir?id={guid}"]:
+        m = re.search(r"i=([a-f0-9-]+)|/ilan/([a-zA-Z0-9_-]+)", url, re.IGNORECASE)
+        ilan_id = (m.group(1) or m.group(2)) if m else ""
+        if ilan_id and "kariyerkapisi" in url:
+            for api in [
+                f"https://kariyerkapisi.gov.tr/RSS/IlanDetayGetir?id={ilan_id}",
+                f"https://kariyerkapisi.gov.tr/IlanDetay/Getir?id={ilan_id}",
+                f"https://kariyerkapisi.gov.tr/api/ilan/{ilan_id}",
+            ]:
                 try:
                     ar = requests.get(api, headers=HEADERS, timeout=(3, 5))
                     if ar.status_code == 200:
                         try:
                             j_str = _json_str(ar.json())
                             parcalar.append(j_str)
-                            pdf_linkler.extend(re.findall(r"https?://[^\s\"'<>]+\.pdf", j_str, re.IGNORECASE))
+                            pdf_linkler.extend(_pdf_linkleri_bul(j_str, url))
                         except Exception:
                             raw_t = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", ar.text)).split())
                             parcalar.append(raw_t)
-                            pdf_linkler.extend(re.findall(r"https?://[^\s\"'<>]+\.pdf", raw_t, re.IGNORECASE))
+                            pdf_linkler.extend(_pdf_linkleri_bul(raw_t, url))
                 except Exception: continue
         r = requests.get(url, headers=HEADERS, timeout=(3, 5), allow_redirects=True)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, "html.parser")
             for a in soup.find_all("a", href=True):
                 href = urljoin(r.url, (a.get("href") or "").strip())
-                if ".pdf" in href.lower() or "ilan-metni" in href.lower():
+                if ".pdf" in href.lower() or "ilan-metni" in href.lower() or "dokuman" in href.lower():
                     pdf_linkler.append(href)
-            pdf_linkler.extend(re.findall(r"https?://[^\s\"'<>]+\.pdf", r.text, re.IGNORECASE))
+            for iframe in soup.find_all(["iframe", "embed", "object"]):
+                src = urljoin(r.url, (iframe.get("src") or iframe.get("data") or "").strip())
+                if ".pdf" in src.lower():
+                    pdf_linkler.append(src)
+            pdf_linkler.extend(_pdf_linkleri_bul(r.text, r.url))
             tablo_satirlari = [" | ".join(td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])) for tr in soup.find_all("tr")]
             script_metinleri = [" ".join(html.unescape(re.sub(r"<[^>]+>", " ", s.string or s.get_text() or "")).split()) for s in soup.find_all("script")]
             for tag in soup(["script", "style", "nav", "header", "footer"]): tag.decompose()
             parcalar.append(" ".join(soup.get_text(" ", strip=True).split()))
             if tablo_satirlari: parcalar.append(" ; ".join(x for x in tablo_satirlari if x.strip()))
-            if script_metinleri: parcalar.append(" ".join(x for x in script_metinleri if x.strip())[:4000])
-        for p_url in list(dict.fromkeys(pdf_linkler))[:2]:
+            if script_metinleri: parcalar.append(" ".join(x for x in script_metinleri if x.strip())[:5000])
+        for p_url in list(dict.fromkeys(pdf_linkler))[:3]:
             pdf_txt = _pdf_metin_oku(p_url)
             if pdf_txt: parcalar.append(pdf_txt)
     except Exception: pass
-    return " ".join(p for p in parcalar if p)[:18000]
+    return " ".join(p for p in parcalar if p)[:20000]
 def _bilgi_cikar(baslik: str, detay: str, bugun: date) -> Dict[str, Any]:
     metin = tr_lower(f"{baslik} {detay}")
     kurum = "Belirtilmemiş"
