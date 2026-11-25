@@ -220,7 +220,7 @@ def pdf_metin_oku(pdf_url: str) -> str:
         return ""
 
 
-def json_metinine_cevir(value: Any, depth: int = 0) 
+def json_metinine_cevir(value: Any, depth: int = 0): 
 -> str:
     """API JSON yanıtlarındaki ilan alanlarını okunabilir metne dönüştürür."""
     if depth > 12 or value is None:
