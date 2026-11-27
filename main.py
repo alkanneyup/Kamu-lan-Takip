@@ -97,6 +97,7 @@ KAYNAKLAR = [
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+PROBE_DONE = False
 
 
 def tr_lower(value: str) -> str:
@@ -243,47 +244,79 @@ def json_metinine_cevir(value: Any, depth: int = 0) -> str:
     return ""
 
 
-def kariyer_kapisi_api_oku(ilan_id: str, referer_url: str, pdf_links: List[str]) -> Tuple[List[str], int]:
+def kariyer_kapisi_api_oku(
+    ilan_id: str,
+    referer_url: str,
+    pdf_links: List[str],
+    debug_first: bool = False,
+) -> Tuple[List[str], int]:
     api_texts: List[str] = []
     api_hits = 0
     endpoints = [
-        ("https://kariyerkapisi.gov.tr/ilan/GetIlanPreviewPublic", {"ilanId": ilan_id, "id": ilan_id}),
-        ("https://kariyerkapisi.gov.tr/altilan/GetAltIlanInfoByIlanIdPublic", {"ilanId": ilan_id, "id": ilan_id}),
+        "https://kariyerkapisi.gov.tr/ilan/GetIlanPreviewPublic",
+        "https://kariyerkapisi.gov.tr/altilan/GetAltIlanInfoByIlanIdPublic",
     ]
+    param_keys = ["ilanId", "IlanId", "id", "i"]
     req_headers = {
         **HEADERS,
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With": "XMLHttpRequest",
         "Referer": referer_url,
     }
-    for base_url, params in endpoints:
-        for method in ("GET", "POST"):
-            try:
-                if method == "GET":
-                    resp = SESSION.get(base_url, params=params, headers=req_headers, timeout=(6, 12))
-                else:
-                    resp = SESSION.post(base_url, data=params, headers=req_headers, timeout=(6, 12))
-                if resp.status_code != 200 or not resp.text:
+
+    for base_url in endpoints:
+        matched_this_endpoint = False
+        for key in param_keys:
+            payload = {key: ilan_id}
+            for mode in ("GET", "POST_FORM", "POST_JSON"):
+                try:
+                    if mode == "GET":
+                        resp = SESSION.get(base_url, params=payload, headers=req_headers, timeout=(6, 12))
+                    elif mode == "POST_FORM":
+                        resp = SESSION.post(base_url, data=payload, headers=req_headers, timeout=(6, 12))
+                    else:
+                        resp = SESSION.post(base_url, json=payload, headers=req_headers, timeout=(6, 12))
+
+                    body = (resp.text or "").strip()
+                    if debug_first and resp.status_code == 200 and body and "sayfa bulunamad" not in tr_lower(body):
+                        logging.info(
+                            "[API PROB] %s (%s %s=%s) -> len=%s | %s",
+                            base_url.split("/")[-1], mode, key, ilan_id[:8], len(body), body[:240],
+                        )
+
+                    if resp.status_code != 200 or not body or "sayfa bulunamad" in tr_lower(body):
+                        continue
+
+                    for raw in re.findall(
+                        r"""(?:https?://[^\s"'<>]+|/[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>]*)?)""",
+                        body,
+                        flags=re.I,
+                    ):
+                        pdf_links.append(urljoin("https://kariyerkapisi.gov.tr/", raw.rstrip("),;")))
+
+                    if body.startswith(("{", "[")):
+                        conv = json_metinine_cevir(json.loads(body))
+                        if conv and len(conv) > 50:
+                            api_hits += 1
+                            api_texts.append(conv[:30000])
+                            matched_this_endpoint = True
+                            break
+                    elif "<html" not in body.lower() and len(body) > 80:
+                        cleaned = temizle(body)
+                        if len(cleaned) > 80:
+                            api_hits += 1
+                            api_texts.append(cleaned[:30000])
+                            matched_this_endpoint = True
+                            break
+                except Exception:
                     continue
-                body = resp.text.strip()
-                for raw in re.findall(
-                    r"""(?:https?://[^\s"'<>]+|/[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>]*)?)""",
-                    body,
-                    flags=re.I,
-                ):
-                    pdf_links.append(urljoin("https://kariyerkapisi.gov.tr/", raw.rstrip("),;")))
-                if body.startswith(("{", "[")):
-                    conv = json_metinine_cevir(json.loads(body))
-                    if conv and len(conv) > 50 and "sayfa bulunamad" not in tr_lower(conv):
-                        api_hits += 1
-                        api_texts.append(conv[:30000])
-                        break
-            except Exception:
-                continue
+            if matched_this_endpoint:
+                break
     return api_texts, api_hits
 
 
 def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
+    global PROBE_DONE
     if not url:
         return "", 0, "Bağlantı yok"
 
@@ -291,6 +324,7 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
     pdf_links: List[str] = []
     final_url = url
     api_count = 0
+    debug_first = not PROBE_DONE
 
     try:
         resp = SESSION.get(url, timeout=(6, 14), allow_redirects=True)
@@ -302,6 +336,19 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
                 if raw and (".pdf" in raw.lower() or "ilan-metni" in raw.lower()):
                     pdf_links.append(urljoin(final_url, raw))
             for sc in soup.find_all("script"):
+                src_attr = (sc.get("src") or "").strip()
+                if debug_first and "IlanDetayV1" in src_attr:
+                    js_url = urljoin(final_url, src_attr)
+                    try:
+                        js_resp = SESSION.get(js_url, timeout=(6, 12))
+                        if js_resp.status_code == 200:
+                            for target in ("GetIlanPreviewPublic", "GetAltIlanInfoByIlanIdPublic"):
+                                idx = js_resp.text.find(target)
+                                if idx != -1:
+                                    snippet = js_resp.text[max(0, idx - 120):idx + 260]
+                                    logging.info("[JS SNIPPET %s] %s", target, temizle(snippet))
+                    except Exception:
+                        pass
                 st = sc.string or sc.get_text(" ", strip=True)
                 if st and any(k in tr_lower(st) for k in ["personel", "ilan", "basvuru", "başvuru", "kadro"]):
                     parts.append(temizle(st[:30000]))
@@ -318,38 +365,20 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
         parsed_url = urlparse(final_url)
         ilan_id = (parse_qs(parsed_url.query).get("i") or [""])[0].strip()
         if "kariyerkapisi.gov.tr" in parsed_url.netloc.lower() and ilan_id:
-            api_texts, api_hits = kariyer_kapisi_api_oku(ilan_id, final_url, pdf_links)
+            api_texts, api_hits = kariyer_kapisi_api_oku(
+                ilan_id, final_url, pdf_links, debug_first=debug_first
+            )
             if api_hits:
                 api_count += api_hits
                 parts.extend(api_texts)
 
-        text = temizle(" ".join(parts))
-
-        if len(text) < 450 and browser_page is not None:
-            try:
-                browser_page.goto(final_url, wait_until="domcontentloaded", timeout=15000)
-                try:
-                    browser_page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
-                browser_page.wait_for_timeout(800)
-                b_soup = BeautifulSoup(browser_page.content(), "html.parser")
-                for el in b_soup.find_all(["a", "iframe", "embed", "object", "source"]):
-                    raw = (el.get("href") or el.get("src") or el.get("data") or "").strip()
-                    if raw and (".pdf" in raw.lower() or "ilan-metni" in raw.lower()):
-                        pdf_links.append(urljoin(browser_page.url, raw))
-                for tag in b_soup(["script", "style", "nav", "header", "footer"]):
-                    tag.decompose()
-                b_text = temizle(b_soup.get_text(" ", strip=True))
-                if b_text:
-                    parts.append(b_text)
-                final_url = browser_page.url
-            except Exception as exc:
-                logging.info("[TARAYICI YEDEK] %s | %s", final_url, exc)
-
         unique_pdfs = list(dict.fromkeys(pdf_links))[:4]
+        if debug_first:
+            logging.info("[PDF ADAYLARI] %s", unique_pdfs)
+            PROBE_DONE = True
+
         pdf_texts = [p for u in unique_pdfs if (p := pdf_metin_oku(u))]
-        combined = temizle(" ".join([text, " ".join(parts), " ".join(pdf_texts)]))
+        combined = temizle(" ".join(parts + pdf_texts))
         logging.info(
             "[DETAY ÖZET] URL=%s | UZUNLUK=%s | API=%s | PDF=%s",
             final_url, len(combined), api_count, len(unique_pdfs),
@@ -628,75 +657,46 @@ def main() -> None:
     items = kaynaklari_topla()
     logging.info("Toplanan tekil ilan adayı: %s", len(items))
 
-    browser = None
-    playwright_manager = None
-    page = None
-    if sync_playwright:
-        try:
-            playwright_manager = sync_playwright().start()
-            browser = playwright_manager.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            context = browser.new_context(
-                user_agent=HEADERS["User-Agent"],
-                locale="tr-TR",
-                viewport={"width": 1440, "height": 1000},
-                ignore_https_errors=True,
-            )
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-            page = context.new_page()
-            logging.info("JavaScript destekli tarayıcı hazır.")
-        except Exception as exc:
-            logging.warning("Tarayıcı başlatılamadı; requests ile devam edilecek: %s", exc)
-
     new_sent = set(sent_ids)
     pending = []
     messages = []
     counts = {"Uygun": 0, "Kontrol Gerekli": 0, "Elendi": 0, "Başvuru Süresi Geçmiş": 0}
     processed = set()
 
-    try:
-        for index, item in enumerate(items, start=1):
-            title = item.get("title", "")
-            link = item.get("link", "")
-            logging.info("[%s/%s] İnceleniyor: %s", index, len(items), title[:150])
+    for index, item in enumerate(items, start=1):
+        title = item.get("title", "")
+        link = item.get("link", "")
+        logging.info("[%s/%s] İnceleniyor: %s", index, len(items), title[:150])
 
-            detail, pdf_count, final_url = detay_oku(link, browser_page=page) if link else ("", 0, "")
-            result = ilan_degerlendir(item, detail, today, USER_PROFILE)
-            status = result["durum"]
-            counts[status] = counts.get(status, 0) + 1
+        detail, pdf_count, final_url = detay_oku(link) if link else ("", 0, "")
+        result = ilan_degerlendir(item, detail, today, USER_PROFILE)
+        status = result["durum"]
+        counts[status] = counts.get(status, 0) + 1
 
-            if status in ("Elendi", "Başvuru Süresi Geçmiş"):
-                continue
+        if status in ("Elendi", "Başvuru Süresi Geçmiş"):
+            continue
 
-            if status == "Kontrol Gerekli":
-                pending.append({
-                    "tarih": today.isoformat(),
-                    "baslik": title,
-                    "link": link,
-                    "kaynak": item.get("source", ""),
-                    "sebep": result.get("sebep", ""),
-                    "detay_uzunlugu": len(detail),
-                    "pdf_sayisi": pdf_count,
-                    "son_url": final_url,
-                })
-                logging.info("[KONTROL GEREKLİ] %s | %s", title, result.get("sebep"))
-                continue
+        if status == "Kontrol Gerekli":
+            pending.append({
+                "tarih": today.isoformat(),
+                "baslik": title,
+                "link": link,
+                "kaynak": item.get("source", ""),
+                "sebep": result.get("sebep", ""),
+                "detay_uzunlugu": len(detail),
+                "pdf_sayisi": pdf_count,
+                "son_url": final_url,
+            })
+            logging.info("[KONTROL GEREKLİ] %s | %s", title, result.get("sebep"))
+            continue
 
-            identity = result["kimlik"]
-            if identity in sent_ids or identity in processed:
-                continue
-            processed.add(identity)
-            messages.append(telegram_mesaji(result))
-            new_sent.add(identity)
-            logging.info("[UYGUN] %s", title)
-
-    finally:
-        if browser:
-            browser.close()
-        if playwright_manager:
-            playwright_manager.stop()
+        identity = result["kimlik"]
+        if identity in sent_ids or identity in processed:
+            continue
+        processed.add(identity)
+        messages.append(telegram_mesaji(result))
+        new_sent.add(identity)
+        logging.info("[UYGUN] %s", title)
 
     json_kaydet("kontrol_bekleyen.json", pending)
     logging.info("Özet: %s", counts)
