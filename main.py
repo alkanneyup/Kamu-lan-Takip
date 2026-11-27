@@ -7,7 +7,7 @@ import html
 import hashlib
 import logging
 from datetime import datetime, date
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qs
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Tuple, Set, Optional, Any
 
@@ -97,7 +97,6 @@ KAYNAKLAR = [
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
-JS_ENDPOINTS_LOGGED = False
 
 
 def tr_lower(value: str) -> str:
@@ -244,18 +243,54 @@ def json_metinine_cevir(value: Any, depth: int = 0) -> str:
     return ""
 
 
+def kariyer_kapisi_api_oku(ilan_id: str, referer_url: str, pdf_links: List[str]) -> Tuple[List[str], int]:
+    api_texts: List[str] = []
+    api_hits = 0
+    endpoints = [
+        ("https://kariyerkapisi.gov.tr/ilan/GetIlanPreviewPublic", {"ilanId": ilan_id, "id": ilan_id}),
+        ("https://kariyerkapisi.gov.tr/altilan/GetAltIlanInfoByIlanIdPublic", {"ilanId": ilan_id, "id": ilan_id}),
+    ]
+    req_headers = {
+        **HEADERS,
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": referer_url,
+    }
+    for base_url, params in endpoints:
+        for method in ("GET", "POST"):
+            try:
+                if method == "GET":
+                    resp = SESSION.get(base_url, params=params, headers=req_headers, timeout=(6, 12))
+                else:
+                    resp = SESSION.post(base_url, data=params, headers=req_headers, timeout=(6, 12))
+                if resp.status_code != 200 or not resp.text:
+                    continue
+                body = resp.text.strip()
+                for raw in re.findall(
+                    r"""(?:https?://[^\s"'<>]+|/[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>]*)?)""",
+                    body,
+                    flags=re.I,
+                ):
+                    pdf_links.append(urljoin("https://kariyerkapisi.gov.tr/", raw.rstrip("),;")))
+                if body.startswith(("{", "[")):
+                    conv = json_metinine_cevir(json.loads(body))
+                    if conv and len(conv) > 50 and "sayfa bulunamad" not in tr_lower(conv):
+                        api_hits += 1
+                        api_texts.append(conv[:30000])
+                        break
+            except Exception:
+                continue
+    return api_texts, api_hits
+
+
 def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
-    global JS_ENDPOINTS_LOGGED
     if not url:
         return "", 0, "Bağlantı yok"
 
     parts: List[str] = []
     pdf_links: List[str] = []
     final_url = url
-    api_texts: List[str] = []
     api_count = 0
-    err_count = 0
-    js_errors: List[str] = []
 
     try:
         resp = SESSION.get(url, timeout=(6, 14), allow_redirects=True)
@@ -280,83 +315,24 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
             ):
                 pdf_links.append(urljoin(final_url, raw.rstrip("),;")))
 
+        parsed_url = urlparse(final_url)
+        ilan_id = (parse_qs(parsed_url.query).get("i") or [""])[0].strip()
+        if "kariyerkapisi.gov.tr" in parsed_url.netloc.lower() and ilan_id:
+            api_texts, api_hits = kariyer_kapisi_api_oku(ilan_id, final_url, pdf_links)
+            if api_hits:
+                api_count += api_hits
+                parts.extend(api_texts)
+
         text = temizle(" ".join(parts))
 
         if len(text) < 450 and browser_page is not None:
-            def on_page_error(err):
-                if len(js_errors) < 3:
-                    js_errors.append(str(err)[:220])
-
-            def on_response(api_resp):
-                global JS_ENDPOINTS_LOGGED
-                nonlocal api_count, err_count
-                try:
-                    st_code = api_resp.status
-                    a_url = api_resp.url
-                    ctype = api_resp.headers.get("content-type", "").lower()
-                    if st_code >= 400:
-                        err_count += 1
-                        logging.warning("[AĞ HATA] HTTP %s | %s", st_code, a_url[:200])
-                        return
-                    if "google-analytics" in a_url or "googletagmanager" in a_url:
-                        return
-                    if not JS_ENDPOINTS_LOGGED and "IlanDetayV1" in a_url:
-                        js_body = api_resp.text()
-                        endpoints = re.findall(r"""['"](/[^'"\s]{3,100}|https?://[^'"\s]{5,120})['"]""", js_body)
-                        ajax_snippets = re.findall(r"""(?:url|ajax|fetch|post|get)\s*[:(]\s*['"]([^'"]{3,100})['"]""", js_body, flags=re.I)
-                        logging.info("[JS ENDPOINT TEŞHİS] %s | endpoints=%s | ajax=%s", a_url, endpoints[:15], ajax_snippets[:15])
-                        JS_ENDPOINTS_LOGGED = True
-                        return
-                    if any(
-                        a_url.lower().split("?")[0].endswith(ext)
-                        for ext in (".css", ".js", ".woff2", ".png", ".jpg", ".svg", ".ico")
-                    ):
-                        return
-                    if "pdf" in ctype or ".pdf" in a_url.lower():
-                        pdf_links.append(a_url)
-                        return
-
-                    body = api_resp.text()
-                    if not body:
-                        return
-                    for raw in re.findall(
-                        r"""(?:https?://[^\s"'<>]+|/[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>]*)?)""",
-                        body,
-                        flags=re.I,
-                    ):
-                        pdf_links.append(urljoin(a_url, raw.rstrip("),;")))
-
-                    stripped = body.lstrip()
-                    if "json" in ctype or stripped.startswith(("{", "[")):
-                        try:
-                            conv = json_metinine_cevir(json.loads(body))
-                            if conv and len(conv) > 40:
-                                api_count += 1
-                                api_texts.append(conv[:30000])
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-            browser_page.on("pageerror", on_page_error)
-            browser_page.on("response", on_response)
             try:
-                browser_page.goto("https://kariyerkapisi.gov.tr/", wait_until="domcontentloaded", timeout=12000)
-                browser_page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                browser_page.goto(final_url, wait_until="domcontentloaded", timeout=15000)
                 try:
-                    browser_page.wait_for_load_state("networkidle", timeout=6000)
+                    browser_page.wait_for_load_state("networkidle", timeout=5000)
                 except Exception:
                     pass
-                try:
-                    browser_page.wait_for_function(
-                        "() => { const t = (document.body && document.body.innerText || '').trim(); "
-                        "return t.length > 220 && !t.startsWith('Kariyer Kapısı İlan Numarası'); }",
-                        timeout=6000,
-                    )
-                except Exception:
-                    pass
-                browser_page.wait_for_timeout(1000)
-
+                browser_page.wait_for_timeout(800)
                 b_soup = BeautifulSoup(browser_page.content(), "html.parser")
                 for el in b_soup.find_all(["a", "iframe", "embed", "object", "source"]):
                     raw = (el.get("href") or el.get("src") or el.get("data") or "").strip()
@@ -365,29 +341,19 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
                 for tag in b_soup(["script", "style", "nav", "header", "footer"]):
                     tag.decompose()
                 b_text = temizle(b_soup.get_text(" ", strip=True))
-                if len(b_text) > len(text):
-                    text = b_text
-                if api_texts:
-                    parts.append(" ".join(api_texts))
                 if b_text:
                     parts.append(b_text)
                 final_url = browser_page.url
-                logging.info(
-                    "[TEŞHİS] URL=%s | METİN=%s | API=%s | HATA=%s",
-                    final_url, len(b_text), api_count, err_count,
-                )
-                if js_errors:
-                    logging.warning("[JS HATA] %s", js_errors)
-            finally:
-                try:
-                    browser_page.remove_listener("response", on_response)
-                    browser_page.remove_listener("pageerror", on_page_error)
-                except Exception:
-                    pass
+            except Exception as exc:
+                logging.info("[TARAYICI YEDEK] %s | %s", final_url, exc)
 
         unique_pdfs = list(dict.fromkeys(pdf_links))[:4]
         pdf_texts = [p for u in unique_pdfs if (p := pdf_metin_oku(u))]
         combined = temizle(" ".join([text, " ".join(parts), " ".join(pdf_texts)]))
+        logging.info(
+            "[DETAY ÖZET] URL=%s | UZUNLUK=%s | API=%s | PDF=%s",
+            final_url, len(combined), api_count, len(unique_pdfs),
+        )
         return combined[:30000], len(unique_pdfs), final_url
 
     except Exception as exc:
