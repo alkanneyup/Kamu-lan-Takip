@@ -625,30 +625,33 @@ def telegram_gonder(messages: List[str]) -> bool:
 
 def telegram_mesaji(result: Dict[str, Any], is_review: bool = False) -> str:
     safe = lambda value: html.escape(str(value or "Belirtilmemiş"))
-    link = result.get("link", "")
-    link_html = (
-        f'<a href="{html.escape(link, quote=True)}">Resmî ilanı aç</a>'
-        if link.startswith(("https://", "http://")) else "Bağlantı bulunamadı"
-    )
+    title_text = safe(result.get("baslik"))
+    source_text = safe(result.get("kaynak"))
+    link = (result.get("link") or "").strip()
+
+    if link.startswith(("https://", "http://")):
+        title_html = f'<a href="{html.escape(link, quote=True)}"><b>{title_text}</b></a>'
+    else:
+        title_html = f"<b>{title_text}</b>"
+
     header = (
         "<b>🔍 KONTROL GEREKEN KAMU İLANI (DETAY EKSİK)</b>"
         if is_review
         else "<b>🏛️ PROFİLİNİZE UYGUN KAMU PERSONEL ALIMI</b>"
     )
     review_line = f"<b>Durum notu:</b> {safe(result.get('sebep'))}\n" if is_review else ""
+
     return (
         f"{header}\n\n"
+        f"• [{source_text}] {title_html}\n"
         f"<b>Kurum:</b> {safe(result.get('kurum'))}\n"
-        f"<b>İlan:</b> {safe(result.get('baslik'))}\n"
         f"<b>Pozisyon:</b> {safe(result.get('pozisyon'))}\n"
         f"<b>Kontenjan:</b> {safe(result.get('kontenjan'))}\n"
         f"<b>Eğitim:</b> {safe(result.get('egitim'))}\n"
         f"<b>KPSS:</b> {safe(result.get('kpss_turu'))}\n"
         f"<b>Son başvuru:</b> {safe(result.get('son_basvuru'))}\n"
-        f"{review_line}\n"
-        f"<b>Profil:</b> 2026 {safe(USER_PROFILE['puan_turu'])} - {USER_PROFILE['kpss']}\n"
-        f"<b>Kaynak:</b> {safe(result.get('kaynak'))}\n"
-        f"🔗 {link_html}"
+        f"{review_line}"
+        f"<b>Profil:</b> 2026 {safe(USER_PROFILE['puan_turu'])} - {USER_PROFILE['kpss']}"
     )
 
 
