@@ -97,6 +97,7 @@ KAYNAKLAR = [
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+JS_ENDPOINTS_LOGGED = False
 
 
 def tr_lower(value: str) -> str:
@@ -244,6 +245,7 @@ def json_metinine_cevir(value: Any, depth: int = 0) -> str:
 
 
 def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
+    global JS_ENDPOINTS_LOGGED
     if not url:
         return "", 0, "Bağlantı yok"
 
@@ -251,9 +253,9 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
     pdf_links: List[str] = []
     final_url = url
     api_texts: List[str] = []
-    api_previews: List[str] = []
     api_count = 0
     err_count = 0
+    js_errors: List[str] = []
 
     try:
         resp = SESSION.get(url, timeout=(6, 14), allow_redirects=True)
@@ -281,7 +283,12 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
         text = temizle(" ".join(parts))
 
         if len(text) < 450 and browser_page is not None:
+            def on_page_error(err):
+                if len(js_errors) < 3:
+                    js_errors.append(str(err)[:220])
+
             def on_response(api_resp):
+                global JS_ENDPOINTS_LOGGED
                 nonlocal api_count, err_count
                 try:
                     st_code = api_resp.status
@@ -291,12 +298,19 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
                         err_count += 1
                         logging.warning("[AĞ HATA] HTTP %s | %s", st_code, a_url[:200])
                         return
+                    if "google-analytics" in a_url or "googletagmanager" in a_url:
+                        return
+                    if not JS_ENDPOINTS_LOGGED and "IlanDetayV1" in a_url:
+                        js_body = api_resp.text()
+                        endpoints = re.findall(r"""['"](/[^'"\s]{3,100}|https?://[^'"\s]{5,120})['"]""", js_body)
+                        ajax_snippets = re.findall(r"""(?:url|ajax|fetch|post|get)\s*[:(]\s*['"]([^'"]{3,100})['"]""", js_body, flags=re.I)
+                        logging.info("[JS ENDPOINT TEŞHİS] %s | endpoints=%s | ajax=%s", a_url, endpoints[:15], ajax_snippets[:15])
+                        JS_ENDPOINTS_LOGGED = True
+                        return
                     if any(
                         a_url.lower().split("?")[0].endswith(ext)
                         for ext in (".css", ".js", ".woff2", ".png", ".jpg", ".svg", ".ico")
                     ):
-                        return
-                    if "google-analytics" in a_url or "googletagmanager" in a_url:
                         return
                     if "pdf" in ctype or ".pdf" in a_url.lower():
                         pdf_links.append(a_url)
@@ -319,15 +333,15 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
                             if conv and len(conv) > 40:
                                 api_count += 1
                                 api_texts.append(conv[:30000])
-                                if len(api_previews) < 2:
-                                    api_previews.append(f"{a_url[:160]} -> {conv[:220]}")
                         except Exception:
                             pass
                 except Exception:
                     pass
 
+            browser_page.on("pageerror", on_page_error)
             browser_page.on("response", on_response)
             try:
+                browser_page.goto("https://kariyerkapisi.gov.tr/", wait_until="domcontentloaded", timeout=12000)
                 browser_page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 try:
                     browser_page.wait_for_load_state("networkidle", timeout=6000)
@@ -337,11 +351,11 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
                     browser_page.wait_for_function(
                         "() => { const t = (document.body && document.body.innerText || '').trim(); "
                         "return t.length > 220 && !t.startsWith('Kariyer Kapısı İlan Numarası'); }",
-                        timeout=7000,
+                        timeout=6000,
                     )
                 except Exception:
                     pass
-                browser_page.wait_for_timeout(1200)
+                browser_page.wait_for_timeout(1000)
 
                 b_soup = BeautifulSoup(browser_page.content(), "html.parser")
                 for el in b_soup.find_all(["a", "iframe", "embed", "object", "source"]):
@@ -362,13 +376,12 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
                     "[TEŞHİS] URL=%s | METİN=%s | API=%s | HATA=%s",
                     final_url, len(b_text), api_count, err_count,
                 )
-                if len(b_text) < 500 and not api_texts:
-                    logging.info("[METİN ÖNİZLEME] %s", b_text[:300])
-                    for prev in api_previews:
-                        logging.info("[API ÖNİZLEME] %s", prev)
+                if js_errors:
+                    logging.warning("[JS HATA] %s", js_errors)
             finally:
                 try:
                     browser_page.remove_listener("response", on_response)
+                    browser_page.remove_listener("pageerror", on_page_error)
                 except Exception:
                     pass
 
@@ -655,13 +668,17 @@ def main() -> None:
     if sync_playwright:
         try:
             playwright_manager = sync_playwright().start()
-            browser = playwright_manager.chromium.launch(headless=True)
+            browser = playwright_manager.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
             context = browser.new_context(
                 user_agent=HEADERS["User-Agent"],
                 locale="tr-TR",
                 viewport={"width": 1440, "height": 1000},
                 ignore_https_errors=True,
             )
+            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
             page = context.new_page()
             logging.info("JavaScript destekli tarayıcı hazır.")
         except Exception as exc:
