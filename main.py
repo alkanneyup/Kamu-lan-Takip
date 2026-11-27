@@ -52,7 +52,7 @@ HEADERS = {
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json, text/plain, */*; q=0.01",
+    "Accept": "*/*",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
@@ -92,7 +92,6 @@ KAYNAKLAR = [
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
-API_DEBUG_DONE = False
 
 
 def tr_lower(value: str) -> str:
@@ -138,7 +137,7 @@ def aday_baslik_mi(title: str) -> bool:
 def linkleri_cek(url: str, source: str) -> List[Dict[str, str]]:
     results = []
     try:
-        response = SESSION.get(url, timeout=(5, 12), allow_redirects=True)
+        response = SESSION.get(url, timeout=(5, 10), allow_redirects=True)
         if response.status_code != 200:
             logging.warning("[%s] HTTP %s: %s", source, response.status_code, url)
             return results
@@ -205,7 +204,7 @@ def pdf_metin_oku(pdf_url: str) -> str:
     if not pdf_url or not PdfReader:
         return ""
     try:
-        response = SESSION.get(pdf_url, timeout=(6, 20), allow_redirects=True)
+        response = SESSION.get(pdf_url, timeout=(6, 15), allow_redirects=True)
         if response.status_code != 200 or not response.content.startswith(b"%PDF"):
             return ""
         reader = PdfReader(io.BytesIO(response.content))
@@ -239,107 +238,68 @@ def json_metinine_cevir(value: Any, depth: int = 0) -> str:
     return ""
 
 
-def api_url_bul(html_text: str, referer_url: str) -> List[str]:
-    bases = ["https://kariyerkapisi.gov.tr"]
-    for match in re.findall(r"""apiURL\s*[:=]\s*["']([^"']+)["']""", html_text or "", flags=re.I):
-        resolved = urljoin(referer_url, match.strip()).rstrip("/")
-        if resolved and resolved not in bases:
-            bases.append(resolved)
-    return bases
-
-
-def kariyer_kapisi_api_oku(
-    ilan_id: str,
-    referer_url: str,
-    html_text: str,
-    pdf_links: List[str],
-    debug_first: bool = False,
-) -> Tuple[List[str], int]:
+def kariyer_kapisi_api_oku(ilan_id: str, referer_url: str, pdf_links: List[str]) -> Tuple[List[str], int]:
     api_texts: List[str] = []
     api_hits = 0
-    bases = api_url_bul(html_text, referer_url)
-    paths = [
-        "/ilan/GetIlanPreviewPublic",
-        "/altilan/GetAltIlanInfoByIlanIdPublic",
+    endpoints = [
+        "https://kariyerkapisi.gov.tr/ilan/GetIlanPreviewPublic",
+        "https://kariyerkapisi.gov.tr/altilan/GetAltIlanInfoByIlanIdPublic",
     ]
-    key_candidates = ["ilanGuid", "IlanGuid", "id", "ilanId"]
+    payload = {"ilanGuid": ilan_id}
     req_headers = {
         **HEADERS,
         "Referer": referer_url,
         "Origin": "https://kariyerkapisi.gov.tr",
-        "X-Requested-With": "XMLHttpRequest",
     }
 
-    for base in bases:
-        for path in paths:
-            url = base + path
-            matched = False
-            for key in key_candidates:
-                payload = {key: ilan_id}
-                for mode in ("POST_JSON", "POST_FORM", "GET"):
-                    try:
-                        if mode == "POST_JSON":
-                            resp = SESSION.post(
-                                url,
-                                json=payload,
-                                headers={**req_headers, "Content-Type": "application/json"},
-                                timeout=(6, 12),
-                            )
-                        elif mode == "POST_FORM":
-                            resp = SESSION.post(
-                                url,
-                                data=payload,
-                                headers=req_headers,
-                                timeout=(6, 12),
-                            )
-                        else:
-                            resp = SESSION.get(
-                                url,
-                                params=payload,
-                                headers=req_headers,
-                                timeout=(6, 12),
-                            )
+    for url in endpoints:
+        for mode in ("POST_JSON", "POST_FORM"):
+            try:
+                if mode == "POST_JSON":
+                    resp = SESSION.post(
+                        url,
+                        json=payload,
+                        headers={**req_headers, "Content-Type": "application/json"},
+                        timeout=(5, 8),
+                    )
+                else:
+                    resp = SESSION.post(
+                        url,
+                        data=payload,
+                        headers=req_headers,
+                        timeout=(5, 8),
+                    )
+                if resp.status_code != 200:
+                    continue
+                body = (resp.text or "").strip()
+                if not body or "sayfa bulunamad" in tr_lower(body):
+                    continue
 
-                        body = (resp.text or "").strip()
-                        if debug_first and (resp.status_code != 404):
-                            logging.info(
-                                "[API DENEME] %s | %s %s -> HTTP %s | len=%s | %s",
-                                url, mode, key, resp.status_code, len(body), body[:180],
-                            )
+                for raw in re.findall(
+                    r"""(?:https?://[^\s"'<>]+|/[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>]*)?)""",
+                    body,
+                    flags=re.I,
+                ):
+                    pdf_links.append(urljoin("https://kariyerkapisi.gov.tr/", raw.rstrip("),;")))
 
-                        if resp.status_code != 200 or not body:
-                            continue
-
-                        for raw in re.findall(
-                            r"""(?:https?://[^\s"'<>]+|/[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>]*)?)""",
-                            body,
-                            flags=re.I,
-                        ):
-                            pdf_links.append(urljoin(base + "/", raw.rstrip("),;")))
-
-                        if body.startswith(("{", "[")):
-                            conv = json_metinine_cevir(json.loads(body))
-                            if conv and len(conv) > 25:
-                                api_hits += 1
-                                api_texts.append(conv[:30000])
-                                matched = True
-                                break
-                        elif "<html" not in body.lower() and len(body) > 25:
-                            cleaned = temizle(body)
-                            if len(cleaned) > 25:
-                                api_hits += 1
-                                api_texts.append(cleaned[:30000])
-                                matched = True
-                                break
-                    except Exception:
-                        continue
-                if matched:
-                    break
+                if body.startswith(("{", "[")):
+                    conv = json_metinine_cevir(json.loads(body))
+                    if conv and len(conv) > 25:
+                        api_hits += 1
+                        api_texts.append(conv[:30000])
+                        break
+                elif "<html" not in body.lower() and len(body) > 25:
+                    cleaned = temizle(body)
+                    if len(cleaned) > 25:
+                        api_hits += 1
+                        api_texts.append(cleaned[:30000])
+                        break
+            except Exception:
+                continue
     return api_texts, api_hits
 
 
 def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
-    global API_DEBUG_DONE
     if not url:
         return "", 0, "Bağlantı yok"
 
@@ -347,11 +307,9 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
     pdf_links: List[str] = []
     final_url = url
     api_count = 0
-    raw_html = ""
-    debug_first = not API_DEBUG_DONE
 
     try:
-        resp = SESSION.get(url, timeout=(6, 14), allow_redirects=True)
+        resp = SESSION.get(url, timeout=(6, 12), allow_redirects=True)
         final_url = resp.url
         if resp.status_code == 200 and "pdf" not in resp.headers.get("Content-Type", "").lower():
             raw_html = resp.text or ""
@@ -373,11 +331,7 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
         parsed_url = urlparse(final_url)
         ilan_id = (parse_qs(parsed_url.query).get("i") or [""])[0].strip()
         if "kariyerkapisi.gov.tr" in parsed_url.netloc.lower() and ilan_id:
-            api_texts, api_hits = kariyer_kapisi_api_oku(
-                ilan_id, final_url, raw_html, pdf_links, debug_first=debug_first
-            )
-            if debug_first:
-                API_DEBUG_DONE = True
+            api_texts, api_hits = kariyer_kapisi_api_oku(ilan_id, final_url, pdf_links)
             if api_hits:
                 api_count += api_hits
                 parts.extend(api_texts)
