@@ -1,3 +1,94 @@
+        if len(text) < 450 and browser_page is not None:
+            def on_response(api_resp):
+                nonlocal api_count, err_count
+                try:
+                    st_code = api_resp.status
+                    a_url = api_resp.url
+                    ctype = api_resp.headers.get("content-type", "").lower()
+                    if st_code >= 400:
+                        err_count += 1
+                        logging.warning("[AĞ HATA] HTTP %s | %s", st_code, a_url[:200])
+                        return
+                    if any(
+                        a_url.lower().split("?")[0].endswith(ext)
+                        for ext in (".css", ".js", ".woff2", ".png", ".jpg", ".svg", ".ico")
+                    ):
+                        return
+                    if "google-analytics" in a_url or "googletagmanager" in a_url:
+                        return
+                    if "pdf" in ctype or ".pdf" in a_url.lower():
+                        pdf_links.append(a_url)
+                        return
+
+                    body = api_resp.text()
+                    if not body:
+                        return
+                    for raw in re.findall(
+                        r"""(?:https?://[^\s"'<>]+|/[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>]*)?)""",
+                        body,
+                        flags=re.I,
+                    ):
+                        pdf_links.append(urljoin(a_url, raw.rstrip("),;")))
+
+                    stripped = body.lstrip()
+                    if "json" in ctype or stripped.startswith(("{", "[")):
+                        try:
+                            conv = json_metinine_cevir(json.loads(body))
+                            if conv and len(conv) > 40:
+                                api_count += 1
+                                api_texts.append(conv[:30000])
+                                if len(api_previews) < 2:
+                                    api_previews.append(f"{a_url[:160]} -> {conv[:220]}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            browser_page.on("response", on_response)
+            try:
+                browser_page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                try:
+                    browser_page.wait_for_load_state("networkidle", timeout=6000)
+                except Exception:
+                    pass
+                try:
+                    browser_page.wait_for_function(
+                        "() => { const t = (document.body && document.body.innerText || '').trim(); "
+                        "return t.length > 220 && !t.startsWith('Kariyer Kapısı İlan Numarası'); }",
+                        timeout=7000,
+                    )
+                except Exception:
+                    pass
+                browser_page.wait_for_timeout(1200)
+
+                b_soup = BeautifulSoup(browser_page.content(), "html.parser")
+                for el in b_soup.find_all(["a", "iframe", "embed", "object", "source"]):
+                    raw = (el.get("href") or el.get("src") or el.get("data") or "").strip()
+                    if raw and (".pdf" in raw.lower() or "ilan-metni" in raw.lower()):
+                        pdf_links.append(urljoin(browser_page.url, raw))
+                for tag in b_soup(["script", "style", "nav", "header", "footer"]):
+                    tag.decompose()
+                b_text = temizle(b_soup.get_text(" ", strip=True))
+                if len(b_text) > len(text):
+                    text = b_text
+                if api_texts:
+                    parts.append(" ".join(api_texts))
+                if b_text:
+                    parts.append(b_text)
+                final_url = browser_page.url
+                logging.info(
+                    "[TEŞHİS] URL=%s | METİN=%s | API=%s | HATA=%s",
+                    final_url, len(b_text), api_count, err_count,
+                )
+                if len(b_text) < 500 and not api_texts:
+                    logging.info("[METİN ÖNİZLEME] %s", b_text[:300])
+                    for prev in api_previews:
+                        logging.info("[API ÖNİZLEME] %s", prev)
+            finally:
+                try:
+                    browser_page.remove_listener("response", on_response)
+                except Exception:
+                    pass
 import io
 import os
 import re
@@ -301,35 +392,28 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
                     if "pdf" in ctype or ".pdf" in a_url.lower():
                         pdf_links.append(a_url)
                         return
-                    if any(x in ctype for x in ["json", "text", "html"]):
-                        body = api_resp.text()
-                        if not body:
-                            return
-                        for raw in re.findall(
-                            r"""(?:https?://[^\s"'<>]+|/[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>]*)?)""",
-                            body,
-                            flags=re.I,
-                        ):
-                            pdf_links.append(urljoin(a_url, raw.rstrip("),;")))
-                        if "json" in ctype or body.lstrip().startswith(("{", "[")):
-                            try:
-                                conv = json_metinine_cevir(json.loads(body))
-                                if conv:
-                                    api_count += 1
-                                    api_texts.append(conv[:30000])
-                                    if len(api_previews) < 2:
-                                        api_previews.append(f"{a_url[:160]} -> {conv[:220]}")
-                            except Exception:
-                                pass
-                        elif any(
-                            w in tr_lower(body)
-                            for w in ["personel", "başvuru", "basvuru", "ilan", "kadro", "kpss", "önlisans"]
-                        ):
-                            cleaned_body = temizle(body[:30000])
-                            api_count += 1
-                            api_texts.append(cleaned_body)
-                            if len(api_previews) < 2:
-                                api_previews.append(f"{a_url[:160]} -> {cleaned_body[:220]}")
+
+                    body = api_resp.text()
+                    if not body:
+                        return
+                    for raw in re.findall(
+                        r"""(?:https?://[^\s"'<>]+|/[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>]*)?)""",
+                        body,
+                        flags=re.I,
+                    ):
+                        pdf_links.append(urljoin(a_url, raw.rstrip("),;")))
+
+                    stripped = body.lstrip()
+                    if "json" in ctype or stripped.startswith(("{", "[")):
+                        try:
+                            conv = json_metinine_cevir(json.loads(body))
+                            if conv and len(conv) > 40:
+                                api_count += 1
+                                api_texts.append(conv[:30000])
+                                if len(api_previews) < 2:
+                                    api_previews.append(f"{a_url[:160]} -> {conv[:220]}")
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
@@ -337,13 +421,18 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
             try:
                 browser_page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 try:
+                    browser_page.wait_for_load_state("networkidle", timeout=6000)
+                except Exception:
+                    pass
+                try:
                     browser_page.wait_for_function(
-                        "document.body && document.body.innerText && document.body.innerText.trim().length > 250",
-                        timeout=6000,
+                        "() => { const t = (document.body && document.body.innerText || '').trim(); "
+                        "return t.length > 220 && !t.startsWith('Kariyer Kapısı İlan Numarası'); }",
+                        timeout=7000,
                     )
                 except Exception:
                     pass
-                browser_page.wait_for_timeout(800)
+                browser_page.wait_for_timeout(1200)
 
                 b_soup = BeautifulSoup(browser_page.content(), "html.parser")
                 for el in b_soup.find_all(["a", "iframe", "embed", "object", "source"]):
@@ -364,7 +453,7 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
                     "[TEŞHİS] URL=%s | METİN=%s | API=%s | HATA=%s",
                     final_url, len(b_text), api_count, err_count,
                 )
-                if len(b_text) < 500:
+                if len(b_text) < 500 and not api_texts:
                     logging.info("[METİN ÖNİZLEME] %s", b_text[:300])
                     for prev in api_previews:
                         logging.info("[API ÖNİZLEME] %s", prev)
@@ -382,6 +471,8 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
     except Exception as exc:
         logging.warning("[DETAY HATASI] %s | %s", url, exc)
         return temizle(" ".join(parts))[:30000], len(list(dict.fromkeys(pdf_links))), final_url
+
+
 def tarih_bul(text: str) -> Tuple[str, Optional[date]]:
     t = tr_lower(text)
     patterns = [
@@ -521,215 +612,4 @@ def uygunluk_degerlendir(
     actual_type = tr_lower(info["kpss_turu"])
     if actual_type in ("p93", "p94", "p3") and actual_type != expected_type:
         return "Uygun Değil", [f"İstenen KPSS türü {actual_type.upper()}, profil {expected_type.upper()}"]
-    if info["taban_puan"] is not None and float(profile["kpss"]) < info["taban_puan"]:
-        return "Uygun Değil", ["KPSS puanı ilan taban puanının altında"]
-    if actual_type == expected_type:
-        reasons.append(f"{expected_type.upper()} puan türü eşleşiyor")
-    elif actual_type == "Belirtilmemiş":
-        reasons.append("KPSS puan türü doğrulanamadı")
-
-    if info["son_dt"] and info["son_dt"] < today:
-        return "Başvuru Süresi Geçmiş", ["Son başvuru tarihi geçmiş"]
-
-    strong_section = (
-        "adalet" in text
-        or bool(re.search(r"\b3001\b", text))
-        or "herhangi bir önlisans" in text
-        or "önlisans mezunu olmak" in text
-    )
-    education_ok = required_education == "Önlisans" or (
-        required_education == "Belirtilmemiş" and strong_section
-    )
-    score_ok = actual_type == expected_type or (
-        actual_type == "Belirtilmemiş" and "kpss şartı yoktur" in text
-    )
-
-    if education_ok and strong_section and score_ok:
-        return "Uygun", reasons
-    return "Kontrol Gerekli", reasons
-
-
-def ilan_degerlendir(
-    item: Dict[str, str],
-    detail: str,
-    today: date,
-    profile: Dict[str, Any],
-) -> Dict[str, Any]:
-    title = temizle(item.get("title", ""))
-    link = item.get("link", "")
-    source = item.get("source", "Kamu")
-    combined = tr_lower(title + " " + detail)
-
-    if any(word in combined for word in HARIC):
-        return {"durum": "Elendi", "sebep": "Hariç tutulan içerik"}
-
-    if not aday_baslik_mi(title):
-        return {"durum": "Elendi", "sebep": "Başlık gerçek personel alım ilanı değil"}
-
-    if len(detail.strip()) < 100:
-        return {"durum": "Kontrol Gerekli", "sebep": "İlan detayına erişilemedi"}
-
-    info = bilgi_cikar(title, detail)
-    status, reasons = uygunluk_degerlendir(title, detail, info, profile, today)
-
-    identity = md5_id("|".join([
-        tr_lower(title),
-        (link or "").split("?")[0].lower(),
-        tr_lower(info["kurum"]),
-        tr_lower(info["pozisyon"]),
-    ]))
-
-    return {
-        "durum": status,
-        "sebep": "; ".join(reasons) if reasons else status,
-        "kimlik": identity,
-        "baslik": title,
-        "kaynak": source,
-        "link": link,
-        **{k: v for k, v in info.items() if k != "son_dt"},
-    }
-
-
-def telegram_gonder(messages: List[str]) -> bool:
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_ids = [x.strip() for x in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if x.strip()]
-    if not token or not chat_ids:
-        logging.error("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID eksik.")
-        return False
-
-    endpoint = f"https://api.telegram.org/bot{token}/sendMessage"
-    all_ok = True
-    for message in messages:
-        for chat_id in chat_ids:
-            try:
-                response = requests.post(
-                    endpoint,
-                    json={
-                        "chat_id": chat_id,
-                        "text": message[:3900],
-                        "parse_mode": "HTML",
-                        "disable_web_page_preview": True,
-                    },
-                    timeout=20,
-                )
-                if response.status_code != 200:
-                    logging.error("Telegram gönderim hatası: %s", response.text[:500])
-                    all_ok = False
-            except Exception as exc:
-                logging.error("Telegram bağlantı hatası: %s", exc)
-                all_ok = False
-    return all_ok
-
-
-def telegram_mesaji(result: Dict[str, Any]) -> str:
-    safe = lambda value: html.escape(str(value or "Belirtilmemiş"))
-    link = result.get("link", "")
-    link_html = (
-        f'<a href="{html.escape(link, quote=True)}">Resmî ilanı aç</a>'
-        if link.startswith(("https://", "http://")) else "Bağlantı bulunamadı"
-    )
-    return (
-        "<b>🏛️ PROFİLİNİZE UYGUN KAMU PERSONEL ALIMI</b>\n\n"
-        f"<b>Kurum:</b> {safe(result.get('kurum'))}\n"
-        f"<b>İlan:</b> {safe(result.get('baslik'))}\n"
-        f"<b>Pozisyon:</b> {safe(result.get('pozisyon'))}\n"
-        f"<b>Kontenjan:</b> {safe(result.get('kontenjan'))}\n"
-        f"<b>Eğitim:</b> {safe(result.get('egitim'))}\n"
-        f"<b>KPSS:</b> {safe(result.get('kpss_turu'))}\n"
-        f"<b>Son başvuru:</b> {safe(result.get('son_basvuru'))}\n\n"
-        f"<b>Profil:</b> 2026 {safe(USER_PROFILE['puan_turu'])} - {USER_PROFILE['kpss']}\n"
-        f"<b>Kaynak:</b> {safe(result.get('kaynak'))}\n"
-        f"🔗 {link_html}"
-    )
-
-
-def main() -> None:
-    today = datetime.now().date()
-    logging.info("KAMU İLAN TAKİP V2 BAŞLADI | %s", today.isoformat())
-
-    sent_ids: Set[str] = set(json_yukle("sent_ids.json", []))
-    items = kaynaklari_topla()
-    logging.info("Toplanan tekil ilan adayı: %s", len(items))
-
-    browser = None
-    playwright_manager = None
-    page = None
-    if sync_playwright:
-        try:
-            playwright_manager = sync_playwright().start()
-            browser = playwright_manager.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=HEADERS["User-Agent"],
-                locale="tr-TR",
-                viewport={"width": 1440, "height": 1000},
-                ignore_https_errors=True,
-            )
-            page = context.new_page()
-            logging.info("JavaScript destekli tarayıcı hazır.")
-        except Exception as exc:
-            logging.warning("Tarayıcı başlatılamadı; requests ile devam edilecek: %s", exc)
-
-    new_sent = set(sent_ids)
-    pending = []
-    messages = []
-    counts = {"Uygun": 0, "Kontrol Gerekli": 0, "Elendi": 0, "Başvuru Süresi Geçmiş": 0}
-    processed = set()
-
-    try:
-        for index, item in enumerate(items, start=1):
-            title = item.get("title", "")
-            link = item.get("link", "")
-            logging.info("[%s/%s] İnceleniyor: %s", index, len(items), title[:150])
-
-            detail, pdf_count, final_url = detay_oku(link, browser_page=page) if link else ("", 0, "")
-            result = ilan_degerlendir(item, detail, today, USER_PROFILE)
-            status = result["durum"]
-            counts[status] = counts.get(status, 0) + 1
-
-            if status in ("Elendi", "Başvuru Süresi Geçmiş"):
-                continue
-
-            if status == "Kontrol Gerekli":
-                pending.append({
-                    "tarih": today.isoformat(),
-                    "baslik": title,
-                    "link": link,
-                    "kaynak": item.get("source", ""),
-                    "sebep": result.get("sebep", ""),
-                    "detay_uzunlugu": len(detail),
-                    "pdf_sayisi": pdf_count,
-                    "son_url": final_url,
-                })
-                logging.info("[KONTROL GEREKLİ] %s | %s", title, result.get("sebep"))
-                continue
-
-            identity = result["kimlik"]
-            if identity in sent_ids or identity in processed:
-                continue
-            processed.add(identity)
-            messages.append(telegram_mesaji(result))
-            new_sent.add(identity)
-            logging.info("[UYGUN] %s", title)
-
-    finally:
-        if browser:
-            browser.close()
-        if playwright_manager:
-            playwright_manager.stop()
-
-    json_kaydet("kontrol_bekleyen.json", pending)
-    logging.info("Özet: %s", counts)
-    logging.info("Kontrol bekleyen ilan: %s", len(pending))
-
-    if messages:
-        if telegram_gonder(messages):
-            json_kaydet("sent_ids.json", sorted(new_sent))
-            logging.info("%s uygun ilan Telegram'a gönderildi.", len(messages))
-        else:
-            logging.error("Telegram gönderimi tamamlanamadı; gönderim kayıtları güncellenmedi.")
-    else:
-        logging.info("Yeni ve doğrulanmış uygun ilan bulunamadı.")
-
-
-if __name__ == "__main__":
-    main()
+    if info["t
