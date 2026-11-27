@@ -396,7 +396,7 @@ def bilgi_cikar(title: str, detail: str) -> Dict[str, Any]:
 
     quota = "Belirtilmemiş"
     qmatch = re.search(
-        r"(?:toplam\s*)?(?:\d+\s*)?(?:kişilik\s*)?(?:kontenjan|kadro|personel)\D{0,35}(\d{1,4})\s*(?:kişi|personel|memur|işçi|adet)?",
+        r"(?:toplam\s*)?(?:\d+\s*)?(?:kişilik\s*)?(?:kontenjan|kadro|personel)\D{0,35}(\d{1,4})\s*(?:kişi|personel|memur|işçi|adet)",
         text,
     )
     if qmatch:
@@ -550,9 +550,9 @@ def ilan_degerlendir(
 
     if len(detail.strip()) <= 300 or status_tag in ("DETAY_YOK", "AG_ENGELI", "HATA"):
         reason_map = {
-            "AG_ENGELI": "Ağ/erişim engeli nedeniyle detay alınamadı",
-            "DETAY_YOK": "Detay metni çekilemedi (JS/API boş)",
-            "HATA": "Detay sayfası okunurken hata oluştu",
+            "AG_ENGELI": "Detay sayfasına erişilemedi",
+            "DETAY_YOK": "Detay metni alınamadı, ilandan kontrol edin",
+            "HATA": "Detay sayfası okunamadı",
         }
         info = bilgi_cikar(title, detail)
         identity = md5_id("|".join([
@@ -563,7 +563,7 @@ def ilan_degerlendir(
         ]))
         return {
             "durum": "Kontrol Gerekli",
-            "sebep": reason_map.get(status_tag, "İlan detayına erişilemedi"),
+            "sebep": reason_map.get(status_tag, "Detay metni alınamadı"),
             "kimlik": identity,
             "baslik": title,
             "kaynak": source,
@@ -624,9 +624,9 @@ def telegram_gonder(messages: List[str]) -> bool:
 
 
 def telegram_mesaji(result: Dict[str, Any], is_review: bool = False) -> str:
-    safe = lambda value: html.escape(str(value or "Belirtilmemiş"))
+    safe = lambda value: html.escape(str(value or ""))
     title_text = safe(result.get("baslik"))
-    source_text = safe(result.get("kaynak"))
+    source_text = safe(result.get("kaynak")) or "Kamu"
     link = (result.get("link") or "").strip()
 
     if link.startswith(("https://", "http://")):
@@ -635,24 +635,31 @@ def telegram_mesaji(result: Dict[str, Any], is_review: bool = False) -> str:
         title_html = f"<b>{title_text}</b>"
 
     header = (
-        "<b>🔍 KONTROL GEREKEN KAMU İLANI (DETAY EKSİK)</b>"
+        "<b>🔍 KONTROL GEREKEN İLANLAR</b>"
         if is_review
-        else "<b>🏛️ PROFİLİNİZE UYGUN KAMU PERSONEL ALIMI</b>"
+        else "<b>🏛️ UYGUN KAMU İLANLARI</b>"
     )
-    review_line = f"<b>Durum notu:</b> {safe(result.get('sebep'))}\n" if is_review else ""
 
-    return (
-        f"{header}\n\n"
-        f"• [{source_text}] {title_html}\n"
-        f"<b>Kurum:</b> {safe(result.get('kurum'))}\n"
-        f"<b>Pozisyon:</b> {safe(result.get('pozisyon'))}\n"
-        f"<b>Kontenjan:</b> {safe(result.get('kontenjan'))}\n"
-        f"<b>Eğitim:</b> {safe(result.get('egitim'))}\n"
-        f"<b>KPSS:</b> {safe(result.get('kpss_turu'))}\n"
-        f"<b>Son başvuru:</b> {safe(result.get('son_basvuru'))}\n"
-        f"{review_line}"
-        f"<b>Profil:</b> 2026 {safe(USER_PROFILE['puan_turu'])} - {USER_PROFILE['kpss']}"
-    )
+    lines = [header, "", f"• [{source_text}] {title_html}"]
+
+    field_labels = [
+        ("pozisyon", "Pozisyon"),
+        ("kontenjan", "Kontenjan"),
+        ("egitim", "Eğitim"),
+        ("kpss_turu", "KPSS"),
+        ("son_basvuru", "Son başvuru"),
+    ]
+    for key, label in field_labels:
+        val = str(result.get(key) or "").strip()
+        if val and val != "Belirtilmemiş":
+            lines.append(f"<b>{label}:</b> {safe(val)}")
+
+    if is_review:
+        note = str(result.get("sebep") or "").strip()
+        if note:
+            lines.append(f"<i>{safe(note)}</i>")
+
+    return "\n".join(lines)
 
 
 def main() -> None:
