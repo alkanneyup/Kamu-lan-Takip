@@ -251,6 +251,7 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
     pdf_links: List[str] = []
     final_url = url
     api_texts: List[str] = []
+    api_previews: List[str] = []
     api_count = 0
     err_count = 0
 
@@ -316,14 +317,19 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
                                 if conv:
                                     api_count += 1
                                     api_texts.append(conv[:30000])
+                                    if len(api_previews) < 2:
+                                        api_previews.append(f"{a_url[:160]} -> {conv[:220]}")
                             except Exception:
                                 pass
                         elif any(
                             w in tr_lower(body)
                             for w in ["personel", "başvuru", "basvuru", "ilan", "kadro", "kpss", "önlisans"]
                         ):
+                            cleaned_body = temizle(body[:30000])
                             api_count += 1
-                            api_texts.append(temizle(body[:30000]))
+                            api_texts.append(cleaned_body)
+                            if len(api_previews) < 2:
+                                api_previews.append(f"{a_url[:160]} -> {cleaned_body[:220]}")
                 except Exception:
                     pass
 
@@ -358,6 +364,10 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
                     "[TEŞHİS] URL=%s | METİN=%s | API=%s | HATA=%s",
                     final_url, len(b_text), api_count, err_count,
                 )
+                if len(b_text) < 500:
+                    logging.info("[METİN ÖNİZLEME] %s", b_text[:300])
+                    for prev in api_previews:
+                        logging.info("[API ÖNİZLEME] %s", prev)
             finally:
                 try:
                     browser_page.remove_listener("response", on_response)
