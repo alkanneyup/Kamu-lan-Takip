@@ -7,7 +7,7 @@ import html
 import hashlib
 import logging
 from datetime import datetime, date
-from urllib.parse import urljoin, urlparse, parse_qs
+from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Tuple, Set, Optional, Any
 
@@ -18,6 +18,11 @@ try:
     from pypdf import PdfReader
 except Exception:
     PdfReader = None
+
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:
+    sync_playwright = None
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -52,7 +57,7 @@ HEADERS = {
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "*/*",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
@@ -65,6 +70,17 @@ HARIC = [
     "giriş sınavı", "yazılı sınav duyurusu", "önceki sayı", "sonraki sayı",
     "ana sayfa", "mevzuat bilgi sistemi", "abonelik", "künye", "iletişim",
     "duyuru arşivi", "haberler", "etkinlik", "toplantı",
+]
+
+# Başlıkta açıkça göründüğünde detay çekmeden elenecek kadro/alan ifadeleri
+BASLIK_ELENEN = [
+    "bilişim personeli", "bilgisayar mühendisi", "yazılım mühendisi",
+    "elektrik mühendisi", "elektronik mühendisi", "makine mühendisi",
+    "inşaat mühendisi", "harita mühendisi", "jeoloji mühendisi",
+    "hemşire", "ebe", "eczacı", "diş tabibi", "tabip", "doktor",
+    "fizyoterapist", "diyetisyen", "sağlık teknikeri", "röntgen",
+    "öğretim görevlisi", "araştırma görevlisi", "profesör", "doçent",
+    "avukat", "mimar", "veteriner", "psikolog", "sosyal çalışmacı",
 ]
 
 ALIM = [
@@ -132,6 +148,14 @@ def aday_baslik_mi(title: str) -> bool:
     return any(word in t for word in ALIM) or (
         "alım ilanı" in t and any(word in t for word in UNVANLAR)
     )
+
+
+def baslik_profil_uygun_mu(title: str) -> Tuple[bool, str]:
+    t = tr_lower(title)
+    for bad in BASLIK_ELENEN:
+        if bad in t:
+            return False, f"Başlıkta profil dışı kadro: {bad}"
+    return True, ""
 
 
 def linkleri_cek(url: str, source: str) -> List[Dict[str, str]]:
@@ -238,75 +262,16 @@ def json_metinine_cevir(value: Any, depth: int = 0) -> str:
     return ""
 
 
-def kariyer_kapisi_api_oku(ilan_id: str, referer_url: str, pdf_links: List[str]) -> Tuple[List[str], int]:
-    api_texts: List[str] = []
-    api_hits = 0
-    endpoints = [
-        "https://kariyerkapisi.gov.tr/ilan/GetIlanPreviewPublic",
-        "https://kariyerkapisi.gov.tr/altilan/GetAltIlanInfoByIlanIdPublic",
-    ]
-    payload = {"ilanGuid": ilan_id}
-    req_headers = {
-        **HEADERS,
-        "Referer": referer_url,
-        "Origin": "https://kariyerkapisi.gov.tr",
-    }
-
-    for url in endpoints:
-        for mode in ("POST_JSON", "POST_FORM"):
-            try:
-                if mode == "POST_JSON":
-                    resp = SESSION.post(
-                        url,
-                        json=payload,
-                        headers={**req_headers, "Content-Type": "application/json"},
-                        timeout=(5, 8),
-                    )
-                else:
-                    resp = SESSION.post(
-                        url,
-                        data=payload,
-                        headers=req_headers,
-                        timeout=(5, 8),
-                    )
-                if resp.status_code != 200:
-                    continue
-                body = (resp.text or "").strip()
-                if not body or "sayfa bulunamad" in tr_lower(body):
-                    continue
-
-                for raw in re.findall(
-                    r"""(?:https?://[^\s"'<>]+|/[A-Za-z0-9_./-]+\.pdf(?:\?[^\s"'<>]*)?)""",
-                    body,
-                    flags=re.I,
-                ):
-                    pdf_links.append(urljoin("https://kariyerkapisi.gov.tr/", raw.rstrip("),;")))
-
-                if body.startswith(("{", "[")):
-                    conv = json_metinine_cevir(json.loads(body))
-                    if conv and len(conv) > 25:
-                        api_hits += 1
-                        api_texts.append(conv[:30000])
-                        break
-                elif "<html" not in body.lower() and len(body) > 25:
-                    cleaned = temizle(body)
-                    if len(cleaned) > 25:
-                        api_hits += 1
-                        api_texts.append(cleaned[:30000])
-                        break
-            except Exception:
-                continue
-    return api_texts, api_hits
-
-
-def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
+def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str, str]:
     if not url:
-        return "", 0, "Bağlantı yok"
+        return "", 0, "Bağlantı yok", "BAGLANTI_YOK"
 
     parts: List[str] = []
     pdf_links: List[str] = []
+    captured_api: List[str] = []
+    js_errors: List[str] = []
     final_url = url
-    api_count = 0
+    status_tag = "OK"
 
     try:
         resp = SESSION.get(url, timeout=(6, 12), allow_redirects=True)
@@ -328,29 +293,74 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str]:
             ):
                 pdf_links.append(urljoin(final_url, raw.rstrip("),;")))
 
-        parsed_url = urlparse(final_url)
-        ilan_id = (parse_qs(parsed_url.query).get("i") or [""])[0].strip()
-        if "kariyerkapisi.gov.tr" in parsed_url.netloc.lower() and ilan_id:
-            api_texts, api_hits = kariyer_kapisi_api_oku(ilan_id, final_url, pdf_links)
-            if api_hits:
-                api_count += api_hits
-                parts.extend(api_texts)
+        text_so_far = temizle(" ".join(parts))
+        if len(text_so_far) < 400 and browser_page is not None:
+            def on_response(response):
+                try:
+                    ctype = (response.headers.get("content-type") or "").lower()
+                    if response.status == 200 and any(k in ctype for k in ("json", "text/html", "text/plain")):
+                        body = response.text()
+                        if body and len(body) > 40:
+                            if body.lstrip().startswith(("{", "[")):
+                                conv = json_metinine_cevir(json.loads(body))
+                                if conv and len(conv) > 40:
+                                    captured_api.append(conv[:25000])
+                            elif "getilanpreviewpublic" in response.url.lower() or "getaltilaninfobyilanidpublic" in response.url.lower():
+                                captured_api.append(temizle(body)[:25000])
+                except Exception:
+                    pass
+
+            def on_pageerror(err):
+                js_errors.append(str(err))
+
+            browser_page.on("response", on_response)
+            browser_page.on("pageerror", on_pageerror)
+            try:
+                browser_page.goto(final_url, wait_until="domcontentloaded", timeout=15000)
+                try:
+                    browser_page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+                browser_page.wait_for_timeout(1200)
+                b_soup = BeautifulSoup(browser_page.content(), "html.parser")
+                for el in b_soup.find_all(["a", "iframe", "embed", "object", "source"]):
+                    raw = (el.get("href") or el.get("src") or el.get("data") or "").strip()
+                    if raw and (".pdf" in raw.lower() or "ilan-metni" in raw.lower()):
+                        pdf_links.append(urljoin(browser_page.url, raw))
+                for tag in b_soup(["script", "style", "nav", "header", "footer"]):
+                    tag.decompose()
+                b_text = temizle(b_soup.get_text(" ", strip=True))
+                if b_text:
+                    parts.append(b_text)
+                final_url = browser_page.url
+            except Exception as exc:
+                status_tag = "AG_ENGELI"
+                logging.info("[TARAYICI UYARI] %s | %s", final_url, exc)
+            finally:
+                try:
+                    browser_page.remove_listener("response", on_response)
+                    browser_page.remove_listener("pageerror", on_pageerror)
+                except Exception:
+                    pass
 
         valid_pdfs = [
             u for u in dict.fromkeys(pdf_links)
             if ".pdf" in u.lower() or "ilan-metni" in u.lower()
         ][:4]
         pdf_texts = [p for u in valid_pdfs if (p := pdf_metin_oku(u))]
-        combined = temizle(" ".join(parts + pdf_texts))
+        combined = temizle(" ".join(parts + captured_api + pdf_texts))
+        if len(combined) <= 160 and (js_errors or status_tag == "AG_ENGELI"):
+            status_tag = "AG_ENGELI"
         logging.info(
-            "[DETAY ÖZET] URL=%s | UZUNLUK=%s | API=%s | PDF=%s",
-            final_url, len(combined), api_count, len(valid_pdfs),
+            "[DETAY ÖZET] URL=%s | UZUNLUK=%s | API=%s | PDF=%s | DURUM=%s",
+            final_url, len(combined), len(captured_api), len(valid_pdfs), status_tag,
         )
-        return combined[:30000], len(valid_pdfs), final_url
+        return combined[:30000], len(valid_pdfs), final_url, status_tag
 
     except Exception as exc:
         logging.warning("[DETAY HATASI] %s | %s", url, exc)
-        return temizle(" ".join(parts))[:30000], 0, final_url
+        return temizle(" ".join(parts))[:30000], 0, final_url, "HATA"
+
 def tarih_bul(text: str) -> Tuple[str, Optional[date]]:
     t = tr_lower(text)
     patterns = [
@@ -521,6 +531,7 @@ def uygunluk_degerlendir(
 def ilan_degerlendir(
     item: Dict[str, str],
     detail: str,
+    status_tag: str,
     today: date,
     profile: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -535,8 +546,13 @@ def ilan_degerlendir(
     if not aday_baslik_mi(title):
         return {"durum": "Elendi", "sebep": "Başlık gerçek personel alım ilanı değil"}
 
+    title_ok, title_reason = baslik_profil_uygun_mu(title)
+    if not title_ok:
+        return {"durum": "Elendi", "sebep": title_reason}
+
     if len(detail.strip()) < 100:
-        return {"durum": "Kontrol Gerekli", "sebep": "İlan detayına erişilemedi"}
+        reason = "Ağ/erişim engeli nedeniyle detay alınamadı" if status_tag == "AG_ENGELI" else "İlan detayına erişilemedi"
+        return {"durum": "Kontrol Gerekli", "sebep": reason}
 
     info = bilgi_cikar(title, detail)
     status, reasons = uygunluk_degerlendir(title, detail, info, profile, today)
@@ -620,46 +636,83 @@ def main() -> None:
     items = kaynaklari_topla()
     logging.info("Toplanan tekil ilan adayı: %s", len(items))
 
+    browser = None
+    playwright_manager = None
+    page = None
+    if sync_playwright:
+        try:
+            playwright_manager = sync_playwright().start()
+            browser = playwright_manager.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                locale="tr-TR",
+                viewport={"width": 1440, "height": 1000},
+                ignore_https_errors=True,
+            )
+            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+            page = context.new_page()
+            logging.info("JavaScript destekli tarayıcı hazır.")
+        except Exception as exc:
+            logging.warning("Tarayıcı başlatılamadı; requests ile devam edilecek: %s", exc)
+
     new_sent = set(sent_ids)
     pending = []
     messages = []
     counts = {"Uygun": 0, "Kontrol Gerekli": 0, "Elendi": 0, "Başvuru Süresi Geçmiş": 0}
     processed = set()
 
-    for index, item in enumerate(items, start=1):
-        title = item.get("title", "")
-        link = item.get("link", "")
-        logging.info("[%s/%s] İnceleniyor: %s", index, len(items), title[:150])
+    try:
+        for index, item in enumerate(items, start=1):
+            title = item.get("title", "")
+            link = item.get("link", "")
+            logging.info("[%s/%s] İnceleniyor: %s", index, len(items), title[:150])
 
-        detail, pdf_count, final_url = detay_oku(link) if link else ("", 0, "")
-        result = ilan_degerlendir(item, detail, today, USER_PROFILE)
-        status = result["durum"]
-        counts[status] = counts.get(status, 0) + 1
+            title_ok, title_reason = baslik_profil_uygun_mu(title)
+            if not title_ok:
+                counts["Elendi"] += 1
+                logging.info("[ELENDİ - BAŞLIK] %s | %s", title, title_reason)
+                continue
 
-        if status in ("Elendi", "Başvuru Süresi Geçmiş"):
-            continue
+            detail, pdf_count, final_url, status_tag = (
+                detay_oku(link, browser_page=page) if link else ("", 0, "", "BAGLANTI_YOK")
+            )
+            result = ilan_degerlendir(item, detail, status_tag, today, USER_PROFILE)
+            status = result["durum"]
+            counts[status] = counts.get(status, 0) + 1
 
-        if status == "Kontrol Gerekli":
-            pending.append({
-                "tarih": today.isoformat(),
-                "baslik": title,
-                "link": link,
-                "kaynak": item.get("source", ""),
-                "sebep": result.get("sebep", ""),
-                "detay_uzunlugu": len(detail),
-                "pdf_sayisi": pdf_count,
-                "son_url": final_url,
-            })
-            logging.info("[KONTROL GEREKLİ] %s | %s", title, result.get("sebep"))
-            continue
+            if status in ("Elendi", "Başvuru Süresi Geçmiş"):
+                continue
 
-        identity = result["kimlik"]
-        if identity in sent_ids or identity in processed:
-            continue
-        processed.add(identity)
-        messages.append(telegram_mesaji(result))
-        new_sent.add(identity)
-        logging.info("[UYGUN] %s", title)
+            if status == "Kontrol Gerekli":
+                pending.append({
+                    "tarih": today.isoformat(),
+                    "baslik": title,
+                    "link": link,
+                    "kaynak": item.get("source", ""),
+                    "sebep": result.get("sebep", ""),
+                    "detay_uzunlugu": len(detail),
+                    "pdf_sayisi": pdf_count,
+                    "son_url": final_url,
+                })
+                logging.info("[KONTROL GEREKLİ] %s | %s", title, result.get("sebep"))
+                continue
+
+            identity = result["kimlik"]
+            if identity in sent_ids or identity in processed:
+                continue
+            processed.add(identity)
+            messages.append(telegram_mesaji(result))
+            new_sent.add(identity)
+            logging.info("[UYGUN] %s", title)
+
+    finally:
+        if browser:
+            browser.close()
+        if playwright_manager:
+            playwright_manager.stop()
 
     json_kaydet("kontrol_bekleyen.json", pending)
     logging.info("Özet: %s", counts)
