@@ -72,7 +72,6 @@ HARIC = [
     "duyuru arşivi", "haberler", "etkinlik", "toplantı",
 ]
 
-# Başlıkta açıkça göründüğünde detay çekmeden elenecek kadro/alan ifadeleri
 BASLIK_ELENEN = [
     "bilişim personel", "bilgisayar mühendisi", "yazılım mühendisi",
     "elektrik mühendisi", "elektronik mühendisi", "makine mühendisi",
@@ -555,7 +554,22 @@ def ilan_degerlendir(
             "DETAY_YOK": "Detay metni çekilemedi (JS/API boş)",
             "HATA": "Detay sayfası okunurken hata oluştu",
         }
-        return {"durum": "Kontrol Gerekli", "sebep": reason_map.get(status_tag, "İlan detayına erişilemedi")}
+        info = bilgi_cikar(title, detail)
+        identity = md5_id("|".join([
+            tr_lower(title),
+            (link or "").split("?")[0].lower(),
+            tr_lower(info["kurum"]),
+            tr_lower(info["pozisyon"]),
+        ]))
+        return {
+            "durum": "Kontrol Gerekli",
+            "sebep": reason_map.get(status_tag, "İlan detayına erişilemedi"),
+            "kimlik": identity,
+            "baslik": title,
+            "kaynak": source,
+            "link": link,
+            **{k: v for k, v in info.items() if k != "son_dt"},
+        }
 
     info = bilgi_cikar(title, detail)
     status, reasons = uygunluk_degerlendir(title, detail, info, profile, today)
@@ -609,22 +623,29 @@ def telegram_gonder(messages: List[str]) -> bool:
     return all_ok
 
 
-def telegram_mesaji(result: Dict[str, Any]) -> str:
+def telegram_mesaji(result: Dict[str, Any], is_review: bool = False) -> str:
     safe = lambda value: html.escape(str(value or "Belirtilmemiş"))
     link = result.get("link", "")
     link_html = (
         f'<a href="{html.escape(link, quote=True)}">Resmî ilanı aç</a>'
         if link.startswith(("https://", "http://")) else "Bağlantı bulunamadı"
     )
+    header = (
+        "<b>🔍 KONTROL GEREKEN KAMU İLANI (DETAY EKSİK)</b>"
+        if is_review
+        else "<b>🏛️ PROFİLİNİZE UYGUN KAMU PERSONEL ALIMI</b>"
+    )
+    review_line = f"<b>Durum notu:</b> {safe(result.get('sebep'))}\n" if is_review else ""
     return (
-        "<b>🏛️ PROFİLİNİZE UYGUN KAMU PERSONEL ALIMI</b>\n\n"
+        f"{header}\n\n"
         f"<b>Kurum:</b> {safe(result.get('kurum'))}\n"
         f"<b>İlan:</b> {safe(result.get('baslik'))}\n"
         f"<b>Pozisyon:</b> {safe(result.get('pozisyon'))}\n"
         f"<b>Kontenjan:</b> {safe(result.get('kontenjan'))}\n"
         f"<b>Eğitim:</b> {safe(result.get('egitim'))}\n"
         f"<b>KPSS:</b> {safe(result.get('kpss_turu'))}\n"
-        f"<b>Son başvuru:</b> {safe(result.get('son_basvuru'))}\n\n"
+        f"<b>Son başvuru:</b> {safe(result.get('son_basvuru'))}\n"
+        f"{review_line}\n"
         f"<b>Profil:</b> 2026 {safe(USER_PROFILE['puan_turu'])} - {USER_PROFILE['kpss']}\n"
         f"<b>Kaynak:</b> {safe(result.get('kaynak'))}\n"
         f"🔗 {link_html}"
@@ -701,13 +722,18 @@ def main() -> None:
                     "son_url": final_url,
                 })
                 logging.info("[KONTROL GEREKLİ] %s | %s", title, result.get("sebep"))
+                identity = result.get("kimlik") or md5_id(f"{tr_lower(title)}|{(link or '').lower()}")
+                if identity not in sent_ids and identity not in processed:
+                    processed.add(identity)
+                    messages.append(telegram_mesaji(result, is_review=True))
+                    new_sent.add(identity)
                 continue
 
             identity = result["kimlik"]
             if identity in sent_ids or identity in processed:
                 continue
             processed.add(identity)
-            messages.append(telegram_mesaji(result))
+            messages.append(telegram_mesaji(result, is_review=False))
             new_sent.add(identity)
             logging.info("[UYGUN] %s", title)
 
@@ -724,11 +750,11 @@ def main() -> None:
     if messages:
         if telegram_gonder(messages):
             json_kaydet("sent_ids.json", sorted(new_sent))
-            logging.info("%s uygun ilan Telegram'a gönderildi.", len(messages))
+            logging.info("%s ilan mesajı Telegram'a gönderildi.", len(messages))
         else:
             logging.error("Telegram gönderimi tamamlanamadı; gönderim kayıtları güncellenmedi.")
     else:
-        logging.info("Yeni ve doğrulanmış uygun ilan bulunamadı.")
+        logging.info("Yeni gönderilecek ilan bulunamadı.")
 
 
 if __name__ == "__main__":
