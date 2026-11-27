@@ -74,13 +74,15 @@ HARIC = [
 
 # Başlıkta açıkça göründüğünde detay çekmeden elenecek kadro/alan ifadeleri
 BASLIK_ELENEN = [
-    "bilişim personeli", "bilgisayar mühendisi", "yazılım mühendisi",
+    "bilişim personel", "bilgisayar mühendisi", "yazılım mühendisi",
     "elektrik mühendisi", "elektronik mühendisi", "makine mühendisi",
     "inşaat mühendisi", "harita mühendisi", "jeoloji mühendisi",
+    "endüstri mühendisi", "çevre mühendisi", "mühendis",
     "hemşire", "ebe", "eczacı", "diş tabibi", "tabip", "doktor",
     "fizyoterapist", "diyetisyen", "sağlık teknikeri", "röntgen",
     "öğretim görevlisi", "araştırma görevlisi", "profesör", "doçent",
     "avukat", "mimar", "veteriner", "psikolog", "sosyal çalışmacı",
+    "kalkınma ajansı", "uzman personel", "müfettiş", "denetçi",
 ]
 
 ALIM = [
@@ -95,9 +97,7 @@ UNVANLAR = [
     "infaz koruma memuru", "icra memuru", "icra katibi", "büro personeli",
     "destek personeli", "veri hazırlama ve kontrol işletmeni", "vhki",
     "koruma ve güvenlik görevlisi", "güvenlik görevlisi", "teknisyen",
-    "tekniker", "mühendis", "şoför", "hizmetli", "hemşire", "memur",
-    "sözleşmeli bilişim personeli", "çözümleyici", "programcı",
-    "uzman personel", "öğretim görevlisi", "araştırma görevlisi",
+    "tekniker", "şoför", "hizmetli", "memur",
 ]
 
 KAYNAKLAR = [
@@ -154,7 +154,7 @@ def baslik_profil_uygun_mu(title: str) -> Tuple[bool, str]:
     t = tr_lower(title)
     for bad in BASLIK_ELENEN:
         if bad in t:
-            return False, f"Başlıkta profil dışı kadro: {bad}"
+            return False, f"Başlıkta profil dışı kadro/alan: {bad}"
     return True, ""
 
 
@@ -349,8 +349,8 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str, str]:
         ][:4]
         pdf_texts = [p for u in valid_pdfs if (p := pdf_metin_oku(u))]
         combined = temizle(" ".join(parts + captured_api + pdf_texts))
-        if len(combined) <= 160 and (js_errors or status_tag == "AG_ENGELI"):
-            status_tag = "AG_ENGELI"
+        if len(combined) <= 300 and not captured_api and not pdf_texts:
+            status_tag = "AG_ENGELI" if (js_errors or status_tag == "AG_ENGELI") else "DETAY_YOK"
         logging.info(
             "[DETAY ÖZET] URL=%s | UZUNLUK=%s | API=%s | PDF=%s | DURUM=%s",
             final_url, len(combined), len(captured_api), len(valid_pdfs), status_tag,
@@ -360,7 +360,6 @@ def detay_oku(url: str, browser_page=None) -> Tuple[str, int, str, str]:
     except Exception as exc:
         logging.warning("[DETAY HATASI] %s | %s", url, exc)
         return temizle(" ".join(parts))[:30000], 0, final_url, "HATA"
-
 def tarih_bul(text: str) -> Tuple[str, Optional[date]]:
     t = tr_lower(text)
     patterns = [
@@ -550,9 +549,13 @@ def ilan_degerlendir(
     if not title_ok:
         return {"durum": "Elendi", "sebep": title_reason}
 
-    if len(detail.strip()) < 100:
-        reason = "Ağ/erişim engeli nedeniyle detay alınamadı" if status_tag == "AG_ENGELI" else "İlan detayına erişilemedi"
-        return {"durum": "Kontrol Gerekli", "sebep": reason}
+    if len(detail.strip()) <= 300 or status_tag in ("DETAY_YOK", "AG_ENGELI", "HATA"):
+        reason_map = {
+            "AG_ENGELI": "Ağ/erişim engeli nedeniyle detay alınamadı",
+            "DETAY_YOK": "Detay metni çekilemedi (JS/API boş)",
+            "HATA": "Detay sayfası okunurken hata oluştu",
+        }
+        return {"durum": "Kontrol Gerekli", "sebep": reason_map.get(status_tag, "İlan detayına erişilemedi")}
 
     info = bilgi_cikar(title, detail)
     status, reasons = uygunluk_degerlendir(title, detail, info, profile, today)
